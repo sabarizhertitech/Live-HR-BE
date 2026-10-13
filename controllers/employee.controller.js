@@ -1,6 +1,7 @@
 const EmployeeDetails = require("../Models/EmployeeDetails");
 const Employee = require("../Models/Employee");
 const CareerGap = require("../Models/CareerGap");
+const { calculateEligibleCareerGaps, getCourseJoiningYear } = require("../utilities/careerGapCalculator");
 const LeaveBalance = require("../Models/LeaveBalance");
 const EditRequest = require("../Models/EditRequest");
 const BirthdayWish = require("../Models/BirthdayWish");
@@ -557,65 +558,6 @@ const updateEmployeeDetails = async (req, res) => {
       usedFields.push("previousExperiences");
     }
 
-    /* ───────── CAREER GAPS (10th to 12th) ───────── */
-    if (
-      input.careerGaps !== undefined ||
-      (input.passedOutYear10 && input.passedOutYear12)
-    ) {
-      let parsedGaps = [];
-      if (input.careerGaps) {
-        try {
-          parsedGaps = typeof input.careerGaps === "string" ? JSON.parse(input.careerGaps) : input.careerGaps;
-        } catch {
-          parsedGaps = [];
-        }
-      }
-      if (!Array.isArray(parsedGaps) && parsedGaps && typeof parsedGaps === "object") {
-        parsedGaps = [parsedGaps];
-      }
-
-      const p10 = input.passedOutYear10 || (details ? details.passedOutYear10 : "");
-      const p12 = input.passedOutYear12 || (details ? details.passedOutYear12 : "");
-      const y10Num = parseInt(p10, 10);
-      const y12Num = parseInt(p12, 10);
-      const expected12th = y10Num + 2;
-      const gapYears = y12Num - expected12th;
-      const hasGap = !isNaN(y10Num) && !isNaN(y12Num) && gapYears > 0;
-
-      // Only save when gap exists AND employee provided a valid non-empty reason
-      const validGaps = (Array.isArray(parsedGaps) ? parsedGaps : [])
-        .filter((gap) => {
-          if (!gap) return false;
-          const reason = (gap.reason || "").toString().trim();
-          const duration = Number(gap.gapDuration) || gapYears;
-          return hasGap && duration > 0 && reason.length > 0;
-        })
-        .map((gap) => ({
-          employeeId: employee._id,
-          educationStage: gap.educationStage || "10th to 12th Standard",
-          passedOutYear10: String(gap.passedOutYear10 || p10 || ""),
-          expectedYear12: String(gap.expectedYear12 || expected12th),
-          actualYear12: String(gap.actualYear12 || p12 || ""),
-          gapDuration: Number(gap.gapDuration) || gapYears,
-          reason: String(gap.reason || "").trim(),
-          createdAt: gap.createdAt || new Date(),
-        }));
-
-      // Set clean careerGaps on updateData - never null or empty objects
-      updateData.careerGaps = validGaps;
-
-      // Sync to CareerGap collection
-      try {
-        await CareerGap.deleteMany({ employeeId: employee._id, educationStage: "10th to 12th Standard" });
-        if (validGaps.length > 0) {
-          await CareerGap.insertMany(validGaps.map(g => ({ ...g, empIdString: employee.empId, employeeId: employee._id })));
-        }
-      } catch (err) {
-        console.error("Error syncing CareerGap collection:", err);
-      }
-      usedFields.push("careerGaps");
-    }
-
     /* ───────── COURSES + CERTIFICATES ───────── */
     if (
       input.courses &&
@@ -653,7 +595,6 @@ const updateEmployeeDetails = async (req, res) => {
           if (!certificateKey && !course.certificate) {
             const match =
               existingCourses.find((ec) =>
-
                 (ec._id && course._id && String(ec._id) === String(course._id)) ||
                 (ec.id && course.id && String(ec.id) === String(course.id)) ||
                 (ec.courseType && course.courseType && ec.courseType === course.courseType)
@@ -663,14 +604,106 @@ const updateEmployeeDetails = async (req, res) => {
             }
           }
 
+          let joiningYear = course.joiningYear || "";
+          if (!joiningYear && course.passedOutYear) {
+            const match = String(course.passedOutYear).trim().match(/^(\d{4})\s*-\s*(\d{4})$/);
+            if (match) {
+              joiningYear = match[1];
+            }
+          }
+
           return {
             ...course,
+            joiningYear,
             certificate: certificateKey || (typeof course.certificate === "string" ? course.certificate : null) || existingCert || null,
           };
         })
       );
 
       usedFields.push("courses");
+    }
+
+    /* ───────── CAREER GAPS (Eligible Transitions Only) ───────── */
+    const shouldCheckCareerGaps =
+      input.careerGaps !== undefined ||
+      input.passedOutYear10 !== undefined ||
+      input.passedOutYear12 !== undefined ||
+      input.educationPath !== undefined ||
+      input.courses !== undefined;
+
+    if (shouldCheckCareerGaps) {
+      let parsedGaps = [];
+      if (input.careerGaps) {
+        try {
+          parsedGaps = typeof input.careerGaps === "string" ? JSON.parse(input.careerGaps) : input.careerGaps;
+        } catch {
+          parsedGaps = [];
+        }
+      }
+      if (!Array.isArray(parsedGaps) && parsedGaps && typeof parsedGaps === "object") {
+        parsedGaps = [parsedGaps];
+      }
+
+      const p10 = updateData.passedOutYear10 !== undefined ? updateData.passedOutYear10 : (input.passedOutYear10 !== undefined ? input.passedOutYear10 : (details ? details.passedOutYear10 : ""));
+      const p12 = updateData.passedOutYear12 !== undefined ? updateData.passedOutYear12 : (input.passedOutYear12 !== undefined ? input.passedOutYear12 : (details ? details.passedOutYear12 : ""));
+      const currentEducationPath = updateData.educationPath !== undefined ? updateData.educationPath : (input.educationPath !== undefined ? input.educationPath : (details ? details.educationPath : ""));
+      const currentCourses = updateData.courses || details?.courses || [];
+
+      // Calculate genuine, positive gaps for eligible transitions only
+      const eligibleGaps = calculateEligibleCareerGaps({
+        passedOutYear10: p10,
+        passedOutYear12: p12,
+        educationPath: currentEducationPath,
+        courses: currentCourses,
+      });
+
+      // Match reasons for eligible gaps
+      const existingGaps = Array.isArray(details?.careerGaps) ? details.careerGaps : [];
+      const validGaps = eligibleGaps
+        .map((eg) => {
+          const incoming = Array.isArray(parsedGaps)
+            ? parsedGaps.find((g) => g && g.educationStage === eg.educationStage)
+            : null;
+          const existing = existingGaps.find((g) => g && g.educationStage === eg.educationStage);
+
+          const reason = (
+            incoming?.reason ||
+            (Array.isArray(parsedGaps) && parsedGaps.length === 1 && eligibleGaps.length === 1 ? parsedGaps[0]?.reason : "") ||
+            existing?.reason ||
+            ""
+          ).toString().trim();
+
+          return {
+            employeeId: employee._id,
+            educationStage: eg.educationStage,
+            passedOutYear10: eg.passedOutYear10 || "",
+            expectedYear12: eg.expectedYear12 || "",
+            actualYear12: eg.actualYear12 || "",
+            passedOutYear12: eg.passedOutYear12 || "",
+            expectedUGYear: eg.expectedUGYear || "",
+            actualUGYear: eg.actualUGYear || "",
+            expectedDiplomaYear: eg.expectedDiplomaYear || "",
+            actualDiplomaYear: eg.actualDiplomaYear || "",
+            gapDuration: eg.gapDuration,
+            reason,
+            createdAt: incoming?.createdAt || existing?.createdAt || new Date(),
+          };
+        })
+        .filter((g) => g.gapDuration > 0 && g.reason.length > 0);
+
+      // Set clean careerGaps on updateData - never null or empty objects
+      updateData.careerGaps = validGaps;
+
+      // Sync to CareerGap collection (remove outdated, insert valid)
+      try {
+        await CareerGap.deleteMany({ employeeId: employee._id });
+        if (validGaps.length > 0) {
+          await CareerGap.insertMany(validGaps.map(g => ({ ...g, empIdString: employee.empId, employeeId: employee._id })));
+        }
+      } catch (err) {
+        console.error("Error syncing CareerGap collection:", err);
+      }
+      usedFields.push("careerGaps");
     }
 
     /* ───────── FILE FIELDS → S3 ───────── */
@@ -1011,6 +1044,8 @@ const getEmployeeDetails = async (req, res) => {
       responseData.careerGaps = responseData.careerGaps.filter(
         (g) => g && (Number(g.gapDuration) > 0) && g.reason && g.reason.trim().length > 0
       );
+    } else {
+      responseData.careerGaps = [];
     }
 
     // ✅ Attach signed S3 URLs safely
@@ -1295,38 +1330,76 @@ const adminUpdateEmployee = async (req, res) => {
       }
     });
 
-    /* ── Career Gaps handling in adminUpdateEmployee ── */
-    if (update.careerGaps !== undefined || (update.passedOutYear10 && update.passedOutYear12)) {
-      let parsedGaps = Array.isArray(update.careerGaps) ? update.careerGaps : [];
-      const p10 = update.passedOutYear10 || (details ? details.passedOutYear10 : "");
-      const p12 = update.passedOutYear12 || (details ? details.passedOutYear12 : "");
-      const y10Num = parseInt(p10, 10);
-      const y12Num = parseInt(p12, 10);
-      const expected12th = y10Num + 2;
-      const gapYears = y12Num - expected12th;
-      const hasGap = !isNaN(y10Num) && !isNaN(y12Num) && gapYears > 0;
+    if (Array.isArray(update.courses)) {
+      update.courses = update.courses.map((c) => {
+        let joiningYear = c.joiningYear || "";
+        if (!joiningYear && c.passedOutYear) {
+          const match = String(c.passedOutYear).trim().match(/^(\d{4})\s*-\s*(\d{4})$/);
+          if (match) joiningYear = match[1];
+        }
+        return { ...c, joiningYear };
+      });
+    }
 
-      const validGaps = (Array.isArray(parsedGaps) ? parsedGaps : [])
-        .filter((gap) => {
-          if (!gap) return false;
-          const reason = (gap.reason || "").toString().trim();
-          const duration = Number(gap.gapDuration) || gapYears;
-          return hasGap && duration > 0 && reason.length > 0;
+    /* ── Career Gaps handling in adminUpdateEmployee ── */
+    const shouldCheckCareerGapsAdmin =
+      update.careerGaps !== undefined ||
+      update.passedOutYear10 !== undefined ||
+      update.passedOutYear12 !== undefined ||
+      update.educationPath !== undefined ||
+      update.courses !== undefined;
+
+    if (shouldCheckCareerGapsAdmin) {
+      let parsedGaps = Array.isArray(update.careerGaps) ? update.careerGaps : [];
+      const p10 = update.passedOutYear10 !== undefined ? update.passedOutYear10 : (details ? details.passedOutYear10 : "");
+      const p12 = update.passedOutYear12 !== undefined ? update.passedOutYear12 : (details ? details.passedOutYear12 : "");
+      const currentEducationPath = update.educationPath !== undefined ? update.educationPath : (details ? details.educationPath : "");
+      const currentCourses = update.courses || details?.courses || [];
+
+      // Calculate genuine, positive gaps for eligible transitions only
+      const eligibleGaps = calculateEligibleCareerGaps({
+        passedOutYear10: p10,
+        passedOutYear12: p12,
+        educationPath: currentEducationPath,
+        courses: currentCourses,
+      });
+
+      const existingGaps = Array.isArray(details?.careerGaps) ? details.careerGaps : [];
+      const validGaps = eligibleGaps
+        .map((eg) => {
+          const incoming = Array.isArray(parsedGaps)
+            ? parsedGaps.find((g) => g && g.educationStage === eg.educationStage)
+            : null;
+          const existing = existingGaps.find((g) => g && g.educationStage === eg.educationStage);
+
+          const reason = (
+            incoming?.reason ||
+            (Array.isArray(parsedGaps) && parsedGaps.length === 1 && eligibleGaps.length === 1 ? parsedGaps[0]?.reason : "") ||
+            existing?.reason ||
+            ""
+          ).toString().trim();
+
+          return {
+            employeeId: employee._id,
+            educationStage: eg.educationStage,
+            passedOutYear10: eg.passedOutYear10 || "",
+            expectedYear12: eg.expectedYear12 || "",
+            actualYear12: eg.actualYear12 || "",
+            passedOutYear12: eg.passedOutYear12 || "",
+            expectedUGYear: eg.expectedUGYear || "",
+            actualUGYear: eg.actualUGYear || "",
+            expectedDiplomaYear: eg.expectedDiplomaYear || "",
+            actualDiplomaYear: eg.actualDiplomaYear || "",
+            gapDuration: eg.gapDuration,
+            reason,
+            createdAt: incoming?.createdAt || existing?.createdAt || new Date(),
+          };
         })
-        .map((gap) => ({
-          employeeId: employee._id,
-          educationStage: gap.educationStage || "10th to 12th Standard",
-          passedOutYear10: String(gap.passedOutYear10 || p10 || ""),
-          expectedYear12: String(gap.expectedYear12 || expected12th),
-          actualYear12: String(gap.actualYear12 || p12 || ""),
-          gapDuration: Number(gap.gapDuration) || gapYears,
-          reason: String(gap.reason || "").trim(),
-          createdAt: gap.createdAt || new Date(),
-        }));
+        .filter((g) => g.gapDuration > 0 && g.reason.length > 0);
 
       update.careerGaps = validGaps;
       try {
-        await CareerGap.deleteMany({ employeeId: employee._id, educationStage: "10th to 12th Standard" });
+        await CareerGap.deleteMany({ employeeId: employee._id });
         if (validGaps.length > 0) {
           await CareerGap.insertMany(validGaps.map(g => ({ ...g, empIdString: employee.empId, employeeId: employee._id })));
         }
@@ -1655,6 +1728,8 @@ const getEmployeeByEmpIdString = async (req, res) => {
       responseData.careerGaps = responseData.careerGaps.filter(
         (g) => g && (Number(g.gapDuration) > 0) && g.reason && g.reason.trim().length > 0
       );
+    } else {
+      responseData.careerGaps = [];
     }
 
     responseData = await attachSignedUrls(responseData);

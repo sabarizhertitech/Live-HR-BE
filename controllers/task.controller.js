@@ -248,15 +248,12 @@ function parsePhases(raw) {
    PHASE → DAILY WORK UPDATE SYNC UTILITY
 
    Called any time a phase is created or updated on a Task.
-   It upserts a DailyWorkUpdate where referenceId = phaseId.
-
    Rules:
-   - Lookup is ALWAYS by referenceId (phaseId) — never by taskId.
-   - If a DailyWorkUpdate with this referenceId exists → UPDATE it.
-   - If none exists → CREATE a new one.
-   - On CREATE/UPDATE: never store the parent `task` ID field (set as undefined).
-   - phaseStatus "completed" is always written through.
-   - For non-completed phases, never downgrade an already-completed DailyWorkUpdate.
+   - Identify phase using actual phaseId (fallback to referenceId for legacy compatibility).
+   - If a DailyWorkUpdate exists for this phase → UPDATE it (preserve original updateDate and referenceId).
+   - If none exists → CREATE a new one with phaseId (referenceId undefined if single current record).
+   - Never store parent taskId inside DailyWorkUpdate entry.
+   - Synchronize phaseStatus accurately.
 ══════════════════════════════════════════════════════════ */
 async function syncPhaseToDailyWorkUpdate({
   phaseId,
@@ -273,53 +270,91 @@ async function syncPhaseToDailyWorkUpdate({
   try {
     if (!phaseId || !mongoose.Types.ObjectId.isValid(phaseId.toString())) return;
 
-    const refId = new mongoose.Types.ObjectId(phaseId.toString());
-
-    // Always find by referenceId (phaseId) — this is the single source of truth
-    const existing = await DailyWorkUpdate.findOne({ referenceId: refId });
-
+    const pId = new mongoose.Types.ObjectId(phaseId.toString());
     const incomingStatus = (phaseStatus || "inprocess").toLowerCase();
-    const resolvedDate = updateDate || new Date();
+    const resolvedDate = updateDate ? new Date(updateDate) : new Date();
 
-    if (existing) {
-      // ── UPDATE existing record ──
-      const currentStatus = (existing.status || "").toLowerCase();
+    const targetDate = new Date(resolvedDate);
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
 
-      // Never downgrade a completed phase unless incoming is also completed
-      const shouldUpdateStatus = currentStatus !== "completed" || incomingStatus === "completed";
+    // 1. Check if a record already exists for this phase on the SAME CALENDAR DAY
+    const sameDayRecord = await DailyWorkUpdate.findOne({
+      $or: [{ phaseId: pId }, { referenceId: pId }],
+      updateDate: { $gte: startOfDay, $lte: endOfDay }
+    });
 
-      existing.title = phaseTitle || existing.title;
-      existing.description = phaseDescription ?? existing.description;
-      if (shouldUpdateStatus) existing.status = incomingStatus;
-      existing.updateDate = resolvedDate;
-      if (category) existing.category = category;
-      if (project) existing.project = project;
-      if (workType !== undefined) existing.workType = workType;
-      if (pages !== undefined) existing.pages = pages;
+    if (sameDayRecord) {
+      // ── UPDATE existing record on the SAME day ──
+      sameDayRecord.phaseId = pId;
+      sameDayRecord.title = phaseTitle || sameDayRecord.title;
+      sameDayRecord.description = phaseDescription ?? sameDayRecord.description;
+      sameDayRecord.status = incomingStatus;
+      if (category) sameDayRecord.category = category;
+      if (project) sameDayRecord.project = project;
+      if (workType !== undefined) sameDayRecord.workType = (workType && String(workType).trim()) ? String(workType).trim() : undefined;
+      if (pages !== undefined) sameDayRecord.pages = (Array.isArray(pages) && pages.length > 0) ? pages.map(p => String(p).trim()).filter(Boolean) : undefined;
+      sameDayRecord.task = undefined;
 
-      // ✅ Never store the task ID
-      existing.task = undefined;
-
-      await existing.save();
+      await sameDayRecord.save();
     } else {
-      // ── CREATE new record ──
-      // Store referenceId (phaseId) but NOT the task ID
-      await DailyWorkUpdate.create({
-        referenceId: refId,
-        task: undefined, // Never store the parent taskId inside the DailyWorkUpdate entry!
-        userId: userId ? new mongoose.Types.ObjectId(userId.toString()) : undefined,
-        title: phaseTitle,
-        description: phaseDescription || "",
-        status: incomingStatus,
-        updateDate: resolvedDate,
-        category: category || "",
-        project: project || "",
-        workType: workType || "",
-        pages: pages || [],
-      });
+      // ── NO RECORD ON THIS CALENDAR DAY ──
+      // Check if historical daily-work records exist for this phase on prior days
+      const existingPhaseRecords = await DailyWorkUpdate.find({
+        $or: [{ phaseId: pId }, { referenceId: pId }]
+      }).sort({ updateDate: 1 });
+
+      if (existingPhaseRecords.length > 0) {
+        // Multi-day / multiple transitions: Preserve previous day records intact!
+        // Group all records for this phase with a stable referenceId
+        const existingRef = existingPhaseRecords.find(r => r.referenceId && mongoose.Types.ObjectId.isValid(r.referenceId.toString()));
+        const stableRefId = existingRef?.referenceId || new mongoose.Types.ObjectId();
+
+        // Ensure all historical records share this stableRefId
+        await DailyWorkUpdate.updateMany(
+          {
+            $or: [{ phaseId: pId }, { referenceId: pId }],
+            $or: [{ referenceId: { $exists: false } }, { referenceId: null }]
+          },
+          { $set: { referenceId: stableRefId } }
+        );
+
+        // Create a new separate record for this day with the new status
+        await DailyWorkUpdate.create({
+          phaseId: pId,
+          referenceId: stableRefId,
+          task: undefined,
+          userId: userId ? new mongoose.Types.ObjectId(userId.toString()) : undefined,
+          title: phaseTitle,
+          description: phaseDescription || "",
+          status: incomingStatus,
+          updateDate: resolvedDate,
+          category: category || "",
+          project: project || "",
+          workType: (workType && String(workType).trim()) ? String(workType).trim() : undefined,
+          pages: (Array.isArray(pages) && pages.length > 0) ? pages.map(p => String(p).trim()).filter(Boolean) : undefined,
+        });
+      } else {
+        // First record for this phase: single record, referenceId remains absent
+        await DailyWorkUpdate.create({
+          phaseId: pId,
+          referenceId: undefined,
+          task: undefined,
+          userId: userId ? new mongoose.Types.ObjectId(userId.toString()) : undefined,
+          title: phaseTitle,
+          description: phaseDescription || "",
+          status: incomingStatus,
+          updateDate: resolvedDate,
+          category: category || "",
+          project: project || "",
+          workType: (workType && String(workType).trim()) ? String(workType).trim() : undefined,
+          pages: (Array.isArray(pages) && pages.length > 0) ? pages.map(p => String(p).trim()).filter(Boolean) : undefined,
+        });
+      }
     }
   } catch (err) {
-    // Non-blocking — log but never throw
     serverLog("ERROR", "SYNC_PHASE_TO_DWU", `Phase sync failed for phaseId=${phaseId}: ${err.message}`);
   }
 }
@@ -390,15 +425,15 @@ exports.createTask = async (req, res) => {
       taskTitle,
       taskDetails,
       priority: priority || "Mid",
-      startDate: startDate === "" ? null : startDate,
+      startDate: (startDate && startDate !== "") ? startDate : undefined,
       dueDate: dueDate === "" ? null : dueDate,
-      endDate: endDate === "" ? null : endDate,
+      endDate: (endDate && endDate !== "") ? endDate : undefined,
       status: status || "Assigned",
       assignedStatus: assignedStatus || "Allocated",
       category: category || "",
       project: project || "",
-      workType: (workType || "").trim(),
-      pages: parsedPages,
+      workType: (workType && String(workType).trim()) ? String(workType).trim() : undefined,
+      pages: (Array.isArray(parsedPages) && parsedPages.length > 0) ? parsedPages.map(p => String(p).trim()).filter(Boolean) : undefined,
       createdBy: userId,
       // Setting to undefined prevents empty arrays from being stored in MongoDB
       phases: phaseArr.length > 0 ? phaseArr : undefined,
@@ -785,28 +820,22 @@ exports.updateTask = async (req, res) => {
 
       updates.phases = [...otherPhases, ...incomingPhases];
 
-      // Sync matching DailyWorkUpdate records if referenceId matches phaseId
+      // Sync matching DailyWorkUpdate records using syncPhaseToDailyWorkUpdate
       for (const ip of incomingPhases) {
         if (ip._id && mongoose.Types.ObjectId.isValid(ip._id)) {
           try {
-            const refId = new mongoose.Types.ObjectId(ip._id.toString());
-            const incStatus = (ip.phaseStatus || "inprocess").toLowerCase();
-            const existingUpdate = await DailyWorkUpdate.findOne({ referenceId: refId });
-            if (existingUpdate) {
-              const currentStatus = (existingUpdate.status || "").toLowerCase();
-              const shouldUpdateStatus = currentStatus !== "completed" || incStatus === "completed";
-              await DailyWorkUpdate.updateOne(
-                { referenceId: refId },
-                {
-                  $set: {
-                    title: ip.phaseTitle || existingUpdate.title,
-                    description: ip.phaseDescription ?? existingUpdate.description,
-                    ...(shouldUpdateStatus && { status: incStatus }),
-                    updateDate: ip.updateDate || new Date(),
-                  }
-                }
-              );
-            }
+            await syncPhaseToDailyWorkUpdate({
+              phaseId: ip._id,
+              phaseTitle: ip.phaseTitle,
+              phaseDescription: ip.phaseDescription,
+              phaseStatus: ip.phaseStatus,
+              updateDate: ip.updateDate || new Date(),
+              userId: ip.employeeId || task.createdBy,
+              category: task.category,
+              project: task.project,
+              workType: task.workType,
+              pages: task.pages,
+            });
           } catch (syncErr) {
             console.error("Error syncing phase to daily work update in updateTask:", syncErr);
           }
@@ -1601,7 +1630,12 @@ exports.deleteTask = async (req, res) => {
     // Delete synced daily work updates for this task's phases
     if (task.phases?.length > 0) {
       const phaseIds = task.phases.map(p => p._id);
-      await DailyWorkUpdate.deleteMany({ referenceId: { $in: phaseIds } });
+      await DailyWorkUpdate.deleteMany({
+        $or: [
+          { phaseId: { $in: phaseIds } },
+          { referenceId: { $in: phaseIds } }
+        ]
+      });
     }
 
     await Task.findByIdAndDelete(id);
@@ -1797,6 +1831,7 @@ exports.getProjectPhases = async (req, res) => {
 
     const allWorkData = allUpdates.map(u => {
       const parentTask = tasks.find(t =>
+        (u.phaseId && t.phases?.some(p => p._id.toString() === u.phaseId.toString())) ||
         (u.referenceId && t.phases?.some(p => p._id.toString() === u.referenceId.toString())) ||
         (t.taskTitle === u.title)
       );
@@ -1882,71 +1917,9 @@ exports.updateTaskPhase = async (req, res) => {
 
     await task.save();
 
-    // ALSO sync all DailyWorkUpdate documents with referenceId matching this phaseId
+    // ALSO sync DailyWorkUpdate documents linked to this phaseId
     if (mongoose.Types.ObjectId.isValid(phaseId)) {
       const resolvedUserId = phase.employeeId || (task.assignedMembers?.length > 0 ? task.assignedMembers[0] : task.createdBy);
-      async function syncPhaseToDailyWorkUpdate({
-        phaseId, phaseTitle, phaseDescription,
-        phaseStatus, updateDate, userId, category, project,
-        workType, pages,
-      }) {
-        try {
-          if (!phaseId || !mongoose.Types.ObjectId.isValid(phaseId.toString())) return;
-
-          const refId = new mongoose.Types.ObjectId(phaseId.toString());
-          const incomingStatus = (phaseStatus || "inprocess").toLowerCase();
-          const resolvedDate = updateDate || new Date();
-
-          // ✅ FIX: Use findOneAndUpdate with upsert — NEVER blind insert
-          const existing = await DailyWorkUpdate.findOne({ referenceId: refId });
-
-          if (existing) {
-            const currentStatus = (existing.status || "").toLowerCase();
-            const shouldUpdateStatus = currentStatus !== "completed" || incomingStatus === "completed";
-
-            await DailyWorkUpdate.updateOne(
-              { referenceId: refId },
-              {
-                $set: {
-                  title: phaseTitle || existing.title,
-                  description: phaseDescription ?? existing.description,
-                  ...(shouldUpdateStatus && { status: incomingStatus }),
-                  updateDate: resolvedDate,
-                  ...(category && { category }),
-                  ...(project && { project }),
-                  ...(workType !== undefined && { workType }),
-                  ...(pages !== undefined && { pages }),
-                  task: undefined,
-                }
-              }
-            );
-          } else {
-            // ✅ FIX: Use findOneAndUpdate with upsert to prevent race-condition duplicates
-            await DailyWorkUpdate.findOneAndUpdate(
-              { referenceId: refId }, // match key
-              {
-                $setOnInsert: {
-                  referenceId: refId,
-                  task: undefined,
-                  userId: userId ? new mongoose.Types.ObjectId(userId.toString()) : undefined,
-                  title: phaseTitle,
-                  description: phaseDescription || "",
-                  status: incomingStatus,
-                  updateDate: resolvedDate,
-                  category: category || "",
-                  project: project || "",
-                  workType: workType || "",
-                  pages: pages || [],
-                }
-              },
-              { upsert: true, new: true }
-            );
-          }
-        } catch (err) {
-          serverLog("ERROR", "SYNC_PHASE_TO_DWU", `Phase sync failed for phaseId=${phaseId}: ${err.message}`);
-        }
-      }
-
       await syncPhaseToDailyWorkUpdate({
         phaseId: phase._id,
         phaseTitle: phase.phaseTitle,

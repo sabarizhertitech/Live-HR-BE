@@ -11,19 +11,19 @@ const taskSchema = new mongoose.Schema(
       default: "Mid",
     },
 
-    startDate: { type: Date },
+    startDate: { type: Date, default: undefined },
     dueDate: { type: Date },   // deadline
-    endDate: { type: Date },   // actual completion date
+    endDate: { type: Date, default: undefined },   // actual completion date
     dueReminderSent: { type: Boolean, default: false },
 
     category: { type: String, default: "" },
     project: { type: String, default: "" },
-    workType: { type: String, default: "" },
-    pages: [{ type: String }],
+    workType: { type: String, trim: true, default: undefined },
+    pages: { type: [String], default: undefined },
 
     status: { type: String, default: "Assigned" },
     assignedStatus: { type: String, default: "Allocated" },
-    rejectionReason: { type: String, default: "" },
+    rejectionReason: { type: String, trim: true, default: undefined },
 
     assignedMembers: {
       type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Employee" }],
@@ -75,5 +75,44 @@ const taskSchema = new mongoose.Schema(
     },
   }
 );
+
+function sanitizeTaskFields(doc) {
+  if (doc.workType === null || (typeof doc.workType === "string" && doc.workType.trim() === "")) {
+    doc.set("workType", undefined);
+    if (doc._doc) delete doc._doc.workType;
+  }
+  if (doc.pages === null || (Array.isArray(doc.pages) && doc.pages.length === 0)) {
+    doc.set("pages", undefined);
+    if (doc._doc) delete doc._doc.pages;
+  } else if (Array.isArray(doc.pages)) {
+    const validPages = doc.pages.map((p) => String(p).trim()).filter(Boolean);
+    if (validPages.length === 0) {
+      doc.set("pages", undefined);
+      if (doc._doc) delete doc._doc.pages;
+    } else {
+      doc.pages = validPages;
+    }
+  }
+  if (doc.rejectionReason === null || (typeof doc.rejectionReason === "string" && doc.rejectionReason.trim() === "")) {
+    doc.set("rejectionReason", undefined);
+    if (doc._doc) delete doc._doc.rejectionReason;
+  }
+  if (doc.startDate === null || doc.startDate === "") {
+    doc.set("startDate", undefined);
+    if (doc._doc) delete doc._doc.startDate;
+  }
+  if (doc.endDate === null || doc.endDate === "") {
+    doc.set("endDate", undefined);
+    if (doc._doc) delete doc._doc.endDate;
+  }
+}
+
+taskSchema.pre("validate", function () {
+  sanitizeTaskFields(this);
+});
+
+taskSchema.pre("save", function () {
+  sanitizeTaskFields(this);
+});
 
 module.exports = mongoose.model("Task", taskSchema);

@@ -89,6 +89,11 @@ const employeeDetailsSchema = new mongoose.Schema(
       passedOutYear10: String,
       expectedYear12: String,
       actualYear12: String,
+      passedOutYear12: String,
+      expectedUGYear: String,
+      actualUGYear: String,
+      expectedDiplomaYear: String,
+      actualDiplomaYear: String,
       gapDuration: Number,
       reason: String,
       createdAt: {
@@ -107,6 +112,7 @@ const employeeDetailsSchema = new mongoose.Schema(
       courseName: String,
       cgpa: String,
       passedOutYear: String,
+      joiningYear: String,
       certificate: String
     }],
 

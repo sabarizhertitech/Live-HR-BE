@@ -18,15 +18,27 @@ const careerGapSchema = new mongoose.Schema(
     },
     passedOutYear10: {
       type: String,
-      required: true,
     },
     expectedYear12: {
       type: String,
-      required: true,
     },
     actualYear12: {
       type: String,
-      required: true,
+    },
+    passedOutYear12: {
+      type: String,
+    },
+    expectedUGYear: {
+      type: String,
+    },
+    actualUGYear: {
+      type: String,
+    },
+    expectedDiplomaYear: {
+      type: String,
+    },
+    actualDiplomaYear: {
+      type: String,
     },
     gapDuration: {
       type: Number,
