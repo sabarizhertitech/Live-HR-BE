@@ -203,13 +203,19 @@ const UsersController = {
       let profileCompletion = 0;
       let isProfileRestricted = false;
       let daysRemainingForProfile = 7;
+      let isLastDayForProfile = false;
       let isNewEmployee = false;
+      let isRejectedForProfile = false;
       let profileDeadline = null;
+      let profileApprovalStatus = null;
+      let profileReviewedAt = null;
 
       if (user.role === "employee") {
         const details = await EmployeeDetails.findOne({ empId: user._id });
         if (details) {
           profileCompletion = calculateProfileCompletion(details.toObject(), user);
+          profileApprovalStatus = details.profileApprovalStatus;
+          profileReviewedAt = details.reviewedAt;
         }
         const restriction = checkProfileRestriction({
           role: "employee",
@@ -218,10 +224,15 @@ const UsersController = {
           dateJoined: user.dateJoined,
           createdAt: user.createdAt,
           empId: user.empId,
+          profileApprovalStatus: profileApprovalStatus || user.profileApprovalStatus,
+          reviewedAt: profileReviewedAt || user.profileRejectedAt,
+          profileRejectedAt: user.profileRejectedAt || profileReviewedAt,
         });
         isProfileRestricted = restriction.isRestricted;
         daysRemainingForProfile = restriction.daysRemaining;
+        isLastDayForProfile = restriction.isLastDay;
         isNewEmployee = restriction.isNewEmployee;
+        isRejectedForProfile = restriction.isRejected;
         profileDeadline = restriction.deadline;
       }
 
@@ -245,7 +256,11 @@ const UsersController = {
           isProfileCompleted: user.isProfileCompleted || profileCompletion >= 100,
           isProfileRestricted,
           daysRemainingForProfile,
+          isLastDayForProfile,
           isNewEmployee,
+          isRejectedForProfile,
+          profileApprovalStatus: profileApprovalStatus || user.profileApprovalStatus || null,
+          reviewedAt: profileReviewedAt || user.profileRejectedAt || null,
           profileDeadline,
         });
       }
@@ -269,7 +284,11 @@ const UsersController = {
         isProfileCompleted: user.isProfileCompleted || profileCompletion >= 100,
         isProfileRestricted,
         daysRemainingForProfile,
+        isLastDayForProfile,
         isNewEmployee,
+        isRejectedForProfile,
+        profileApprovalStatus: profileApprovalStatus || user.profileApprovalStatus || null,
+        reviewedAt: profileReviewedAt || user.profileRejectedAt || null,
         profileDeadline,
       });
 
@@ -2246,98 +2265,215 @@ const UsersController = {
   },
 
   // ────────────────────────────────────────────────
-  // DIRECT ADMIN DELETE GENERAL EMPLOYEE DOCUMENT
+  // DIRECT ADMIN / HR DELETE GENERAL EMPLOYEE DOCUMENT
   // ────────────────────────────────────────────────
   deleteGeneralDocument: async (req, res) => {
     try {
       const { empId } = req.params;
-      const { field, key, courseId, courseIdx } = req.body;
+      const { field, key, courseId, courseIdx, certId, certIdx } = req.body;
 
       if (!empId) {
         return res.status(400).json({ success: false, message: "Employee ID is required" });
       }
 
-      // Check Admin access
-      const isAdmin = req.user?.role === "admin" || req.user?.role === "superadmin";
-      if (!isAdmin) {
-        return res.status(403).json({ success: false, message: "Access denied. Only Admin can directly delete documents." });
+      // Check Admin or HR access
+      const isAuthorized =
+        req.user?.role === "admin" ||
+        req.user?.role === "superadmin" ||
+        Boolean(req.user?.isHr);
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Only Admin and HR can delete uploaded documents.",
+        });
       }
 
+      const extractS3Key = (val) => {
+        if (!val || typeof val !== "string") return null;
+        let clean = val.trim();
+        if (clean.startsWith("http://") || clean.startsWith("https://")) {
+          try {
+            const parsed = new URL(clean);
+            clean = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+          } catch (e) {
+            clean = clean.replace(/^https?:\/\/[^\/]+\//, "").split("?")[0];
+          }
+        }
+        return clean.split("?")[0];
+      };
+
       const isObjectId = mongoose.Types.ObjectId.isValid(empId);
-      let employeeDetails = await EmployeeDetails.findOne(
-        isObjectId ? { $or: [{ empId }, { empIdString: empId }, { _id: empId }] } : { empIdString: empId }
-      );
-      if (!employeeDetails && isObjectId) {
-        employeeDetails = await EmployeeDetails.findById(empId);
+      let employeeDetails = null;
+
+      if (isObjectId) {
+        employeeDetails = await EmployeeDetails.findOne({
+          $or: [{ empId }, { empIdString: empId }, { _id: empId }],
+        });
+        if (!employeeDetails) {
+          employeeDetails = await EmployeeDetails.findById(empId);
+        }
+      } else {
+        employeeDetails = await EmployeeDetails.findOne({
+          $or: [{ empIdString: empId }, { empId: empId }],
+        });
       }
-      if (!employeeDetails) {
-        const Employee = require("../Models/Employee");
-        const emp = await Employee.findOne(
+
+      const Employee = require("../Models/Employee");
+      let emp = null;
+
+      if (employeeDetails) {
+        emp = await Employee.findById(employeeDetails.empId);
+      } else {
+        emp = await Employee.findOne(
           isObjectId ? { $or: [{ _id: empId }, { empId }] } : { empId: empId }
         );
         if (emp) {
           employeeDetails = await EmployeeDetails.findOne({ empId: emp._id });
         }
       }
+
       if (!employeeDetails) {
         return res.status(404).json({ success: false, message: "Employee details not found" });
       }
 
-      // Determine S3 key to delete
-      let fileKeyToDelete = key;
-      if (!fileKeyToDelete) {
-        if (field === "marksheet10") fileKeyToDelete = employeeDetails.marksheet10;
-        else if (field === "marksheet12") fileKeyToDelete = employeeDetails.marksheet12;
-        else if (field === "aadhaarFile") fileKeyToDelete = employeeDetails.aadhaarFile;
-        else if (field === "panFile") fileKeyToDelete = employeeDetails.panFile;
-        else if (field === "passbookFile") fileKeyToDelete = employeeDetails.passbookFile;
-        else if (field?.startsWith("courses.") || courseId != null || courseIdx != null) {
-          if (Array.isArray(employeeDetails.courses)) {
-            let c = null;
-            if (courseId) c = employeeDetails.courses.id ? employeeDetails.courses.id(courseId) : employeeDetails.courses.find(x => String(x._id) === String(courseId));
-            else if (courseIdx != null) c = employeeDetails.courses[courseIdx];
-            if (c) fileKeyToDelete = c.certificate;
-          }
-        }
-      }
+      // Determine S3 key to delete and update Database fields
+      let fileKeyToDelete = key || null;
 
-      if (fileKeyToDelete) {
-        await deleteFromS3(fileKeyToDelete).catch(err => console.error("S3 delete error:", err));
-      }
-
-      // Update Database
       if (field === "marksheet10") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.marksheet10;
         employeeDetails.marksheet10 = null;
       } else if (field === "marksheet12") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.marksheet12;
         employeeDetails.marksheet12 = null;
       } else if (field === "aadhaarFile") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.aadhaarFile;
         employeeDetails.aadhaarFile = null;
       } else if (field === "panFile") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.panFile;
         employeeDetails.panFile = null;
       } else if (field === "passbookFile") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.passbookFile;
         employeeDetails.passbookFile = null;
+      } else if (field === "picture") {
+        fileKeyToDelete =
+          fileKeyToDelete ||
+          employeeDetails.picture ||
+          (emp?.photo && emp.photo !== "avatar.png" ? emp.photo : null);
+        employeeDetails.picture = null;
+        if (emp) {
+          emp.photo = "avatar.png";
+          await emp.save({ validateBeforeSave: false });
+        }
+      } else if (field === "degreeCertificate") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.degreeCertificate;
+        employeeDetails.degreeCertificate = null;
+      } else if (field === "ugDegreeCertificate") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.ugDegreeCertificate;
+        employeeDetails.ugDegreeCertificate = null;
+      } else if (field === "pgDegreeCertificate") {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails.pgDegreeCertificate;
+        employeeDetails.pgDegreeCertificate = null;
       } else if (field?.startsWith("courses.") || courseId != null || courseIdx != null) {
         if (Array.isArray(employeeDetails.courses)) {
           let c = null;
-          if (courseId) c = employeeDetails.courses.id ? employeeDetails.courses.id(courseId) : employeeDetails.courses.find(x => String(x._id) === String(courseId));
-          else if (courseIdx != null) c = employeeDetails.courses[courseIdx];
+          if (courseId) {
+            c = employeeDetails.courses.id
+              ? employeeDetails.courses.id(courseId)
+              : employeeDetails.courses.find((x) => String(x._id) === String(courseId));
+          } else if (courseIdx != null) {
+            c = employeeDetails.courses[courseIdx];
+          } else if (field?.startsWith("courses.")) {
+            const parts = field.split(".");
+            const idx = parseInt(parts[1], 10);
+            if (!isNaN(idx)) c = employeeDetails.courses[idx];
+          }
           if (c) {
+            fileKeyToDelete = fileKeyToDelete || c.certificate;
             c.certificate = null;
           }
         }
-      } else if (employeeDetails[field] !== undefined) {
+      } else if (
+        field?.startsWith("professionalCertifications.") ||
+        certId != null ||
+        certIdx != null
+      ) {
+        if (Array.isArray(employeeDetails.professionalCertifications)) {
+          let cert = null;
+          if (certId) {
+            cert = employeeDetails.professionalCertifications.id
+              ? employeeDetails.professionalCertifications.id(certId)
+              : employeeDetails.professionalCertifications.find(
+                  (x) => String(x._id) === String(certId)
+                );
+          } else if (certIdx != null) {
+            cert = employeeDetails.professionalCertifications[certIdx];
+          } else if (field?.startsWith("professionalCertifications.")) {
+            const parts = field.split(".");
+            const idx = parseInt(parts[1], 10);
+            if (!isNaN(idx)) cert = employeeDetails.professionalCertifications[idx];
+          }
+          if (cert) {
+            fileKeyToDelete = fileKeyToDelete || cert.certificate;
+            cert.certificate = null;
+          }
+        }
+      } else if (field && employeeDetails[field] !== undefined) {
+        fileKeyToDelete = fileKeyToDelete || employeeDetails[field];
         employeeDetails[field] = null;
+      }
+
+      // Delete from S3 (and invalidate Redis URL cache)
+      const keyToPurge = extractS3Key(fileKeyToDelete);
+      if (keyToPurge && keyToPurge !== "avatar.png") {
+        await deleteFromS3(keyToPurge).catch((err) =>
+          console.error("S3 delete error:", err)
+        );
+      }
+
+      // Recalculate profile completion score
+      const updatedCompletion = calculateProfileCompletion(
+        employeeDetails.toObject(),
+        emp || null
+      );
+      employeeDetails.profileCompletion = updatedCompletion;
+      if (updatedCompletion < 100) {
+        employeeDetails.isProfileCompleted = false;
+        if (emp) {
+          emp.isProfileCompleted = false;
+          await emp.save({ validateBeforeSave: false });
+        }
       }
 
       await employeeDetails.save({ validateBeforeSave: false });
 
+      if (createLog) {
+        await createLog({
+          action: "DELETE_EMPLOYEE_DOCUMENT",
+          performedBy: req.user?._id || req.user?.id,
+          performedByRole: req.user?.role || (req.user?.isHr ? "hr" : "unknown"),
+          targetUser: emp?._id || employeeDetails.empId,
+          details: {
+            field,
+            fileKey: keyToPurge,
+            empIdString: employeeDetails.empIdString || emp?.empId,
+          },
+        }).catch(() => {});
+      }
+
       return res.status(200).json({
         success: true,
         message: "Document deleted successfully from S3 and database",
+        field,
+        profileCompletion: updatedCompletion,
       });
     } catch (err) {
       console.error("Error deleting general document:", err);
-      return res.status(500).json({ success: false, message: "Internal server error", error: err.message });
+      return res.status(500).json({
+        success: false,
+        message: "Internal server error",
+        error: err.message,
+      });
     }
   },
 

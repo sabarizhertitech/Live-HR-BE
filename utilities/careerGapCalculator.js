@@ -47,7 +47,6 @@ function calculateEligibleCareerGaps({
   const gaps = [];
 
   // Path 1: 10th -> 12th -> Diploma -> Engineering (or 10th -> 12th -> Diploma)
-  // Apply Rule A only.
   if (effectiveValid12 && Boolean(diplomaCourse)) {
     const expected12th = y10Num + 2;
     const gapYears = y12Num - expected12th;
@@ -59,6 +58,43 @@ function calculateEligibleCareerGaps({
         actualYear12: String(y12Num),
         gapDuration: gapYears,
       });
+    }
+
+    const diplomaJoiningYear = getCourseJoiningYear(diplomaCourse);
+    if (diplomaJoiningYear !== null) {
+      const expectedDiploma = y12Num;
+      const gapYearsDiploma = diplomaJoiningYear - expectedDiploma;
+      if (gapYearsDiploma > 0) {
+        gaps.push({
+          educationStage: "12th Standard to Diploma",
+          passedOutYear12: String(y12Num),
+          expectedDiplomaYear: String(expectedDiploma),
+          actualDiplomaYear: String(diplomaJoiningYear),
+          actualYear12: String(y12Num),
+          gapDuration: gapYearsDiploma,
+        });
+      }
+    }
+
+    if (ugCourse) {
+      const ugJoiningYear = getCourseJoiningYear(ugCourse);
+      let diplomaEndYear = null;
+      if (diplomaCourse.passedOutYear) {
+        const m = String(diplomaCourse.passedOutYear).match(/^(\d{4})\s*-\s*(\d{4})$/);
+        if (m) diplomaEndYear = parseInt(m[2], 10);
+      }
+      if (ugJoiningYear !== null && diplomaEndYear !== null) {
+        const gapYearsUG = ugJoiningYear - diplomaEndYear;
+        if (gapYearsUG > 0) {
+          gaps.push({
+            educationStage: "Diploma to UG / Engineering",
+            passedOutYearDiploma: String(diplomaEndYear),
+            expectedUGYear: String(diplomaEndYear),
+            actualUGYear: String(ugJoiningYear),
+            gapDuration: gapYearsUG,
+          });
+        }
+      }
     }
   }
   // Path 2: 10th -> 12th -> UG/Engineering
@@ -81,7 +117,7 @@ function calculateEligibleCareerGaps({
     if (ugCourse) {
       const ugJoiningYear = getCourseJoiningYear(ugCourse);
       if (ugJoiningYear !== null) {
-        const expectedUG = y12Num + 1;
+        const expectedUG = y12Num;
         const gapYearsB = ugJoiningYear - expectedUG;
         if (gapYearsB > 0) {
           gaps.push({
@@ -102,7 +138,7 @@ function calculateEligibleCareerGaps({
     if (diplomaCourse) {
       const diplomaJoiningYear = getCourseJoiningYear(diplomaCourse);
       if (diplomaJoiningYear !== null) {
-        const expectedDiploma = y10Num + 1;
+        const expectedDiploma = y10Num;
         const gapYearsC = diplomaJoiningYear - expectedDiploma;
         if (gapYearsC > 0) {
           gaps.push({
@@ -113,6 +149,27 @@ function calculateEligibleCareerGaps({
             actualYear12: String(diplomaJoiningYear),
             gapDuration: gapYearsC,
           });
+        }
+      }
+
+      if (ugCourse) {
+        const ugJoiningYear = getCourseJoiningYear(ugCourse);
+        let diplomaEndYear = null;
+        if (diplomaCourse.passedOutYear) {
+          const m = String(diplomaCourse.passedOutYear).match(/^(\d{4})\s*-\s*(\d{4})$/);
+          if (m) diplomaEndYear = parseInt(m[2], 10);
+        }
+        if (ugJoiningYear !== null && diplomaEndYear !== null) {
+          const gapYearsUG = ugJoiningYear - diplomaEndYear;
+          if (gapYearsUG > 0) {
+            gaps.push({
+              educationStage: "Diploma to UG / Engineering",
+              passedOutYearDiploma: String(diplomaEndYear),
+              expectedUGYear: String(diplomaEndYear),
+              actualUGYear: String(ugJoiningYear),
+              gapDuration: gapYearsUG,
+            });
+          }
         }
       }
     }

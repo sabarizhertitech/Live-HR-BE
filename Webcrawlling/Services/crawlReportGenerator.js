@@ -402,6 +402,7 @@ async function generateAggregatedReport(jobId, seedUrl) {
     const uniqueLinks  = [...new Set(pages.flatMap(p => (p.links || []).map(l => l.url)))];
     const brokenLinksResult = await safeRun("BrokenLinks", () => checkBrokenLinks(uniqueLinks, 5));
     const brokenLinks  = brokenLinksResult.ok ? brokenLinksResult.result : [];
+    const brokenCount  = brokenLinks.filter(l => l.isBroken).length;
 
     const technologySummary = buildTechnologySummary(pages);
     const technologiesList  = technologySummary.all || [];

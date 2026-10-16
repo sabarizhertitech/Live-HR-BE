@@ -51,6 +51,11 @@ const dailyWorkUpdateSchema = new mongoose.Schema(
       ref: "Task",
       required: false,
     },
+    workUpdateRefId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DailyWorkUpdate",
+      required: false,
+    },
   },
   {
     timestamps: true
@@ -87,6 +92,7 @@ dailyWorkUpdateSchema.pre("save", function () {
 dailyWorkUpdateSchema.index({ userId: 1, updateDate: -1 });
 dailyWorkUpdateSchema.index({ phaseId: 1 });
 dailyWorkUpdateSchema.index({ referenceId: 1 });
+dailyWorkUpdateSchema.index({ workUpdateRefId: 1 });
 dailyWorkUpdateSchema.index({ category: 1, project: 1 });
 
 module.exports = mongoose.model("DailyWorkUpdate", dailyWorkUpdateSchema);

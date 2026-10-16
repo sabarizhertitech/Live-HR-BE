@@ -170,6 +170,8 @@ exports.setSingleHrRole = async (req, res) => {
       return res.status(404).json({ success: false, message: "Employee not found" });
     }
 
+    const isCurrentlyHr = Boolean(targetEmp.isHr);
+
     // Remove isHr field from ALL employees first (enforces single HR rule)
     await Employee.updateMany({}, { $unset: { isHr: "" } });
 

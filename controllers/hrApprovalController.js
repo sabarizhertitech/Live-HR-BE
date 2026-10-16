@@ -894,6 +894,13 @@ async function executeApprovedPayload(actionType, payload) {
           }
         });
 
+        if (detailsUpdate.gender !== undefined || employeeUpdate.gender !== undefined || updatedData.gender !== undefined) {
+          const g = (detailsUpdate.gender || employeeUpdate.gender || updatedData.gender || "").toString().toLowerCase().trim();
+          if (["male", "female", "other"].includes(g)) {
+            employeeUpdate.gender = g;
+          }
+        }
+
         if (Object.keys(employeeUpdate).length > 0) {
           await Employee.findByIdAndUpdate(employee._id, { $set: employeeUpdate });
         }

@@ -59,32 +59,48 @@ const getBrowser = async () => {
   browserPromise = (async () => {
     try {
       const execPath = getExecutablePath();
+      const baseArgs = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--disable-translate",
+        "--mute-audio",
+        "--no-default-browser-check"
+      ];
+
+      if (process.platform === "linux") {
+        baseArgs.push("--no-zygote");
+      }
+
       const launchOptions = {
-        headless: "new",
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-          "--no-first-run",
-          "--no-zygote",
-          "--single-process",
-          "--disable-extensions",
-          "--disable-background-networking",
-          "--disable-default-apps",
-          "--disable-sync",
-          "--disable-translate",
-          "--mute-audio",
-          "--no-default-browser-check",
-          "--js-flags=--max-old-space-size=256"
-        ]
+        headless: true,
+        args: baseArgs
       };
 
       if (execPath) {
         launchOptions.executablePath = execPath;
       }
 
-      const b = await puppeteer.launch(launchOptions);
+      let b;
+      try {
+        b = await puppeteer.launch(launchOptions);
+      } catch (launchErr) {
+        if (launchOptions.executablePath) {
+          console.warn("⚠️ Failed to launch browser with specified executablePath, retrying with default puppeteer browser...", launchErr.message);
+          const fallbackOptions = { ...launchOptions };
+          delete fallbackOptions.executablePath;
+          b = await puppeteer.launch(fallbackOptions);
+        } else {
+          throw launchErr;
+        }
+      }
+
       browser = b;
       b.on("disconnected", () => {
         if (browser === b) {

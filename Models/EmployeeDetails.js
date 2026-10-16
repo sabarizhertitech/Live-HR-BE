@@ -116,6 +116,30 @@ const employeeDetailsSchema = new mongoose.Schema(
       certificate: String
     }],
 
+    professionalCertifications: {
+      type: [{
+        courseName: String,
+        startMonthYear: String,
+        endMonthYear: String,
+        courseDuration: String,
+        durationValue: String,
+        durationUnit: String,
+        durationType: String,
+        courseType: String,
+        institutionName: String,
+        certificate: String,
+        createdAt: {
+          type: Date,
+          default: Date.now,
+        },
+      }],
+      default: undefined,
+    },
+    hasCertifications: {
+      type: String,
+      default: undefined,
+    },
+
     aadhaarNo: String,
     panNo: String,
     uanNo: String,

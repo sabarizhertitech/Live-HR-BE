@@ -10,6 +10,17 @@ const DailyWorkUpdate = require("../Models/Dailyworkupdate");
 const { sendPushNotification } = require("../utilities/notificationService");
 const { sendTaskAssignmentEmail } = require("../utilities/emailService");
 const { createLog } = require("../utilities/logService");
+const { syncTaskWorkingDays } = require("../utilities/workingDaysCalculator");
+const {
+  fetchCompanyHolidaysSet,
+  fetchEmployeeApprovedLeavesSet,
+  calculateEligibleWorkingDays,
+  calculateDeadlineScore,
+} = require("../utilities/taskDeadlineCalculator");
+const {
+  getEmployeeWorkingCalendar,
+  evaluateTaskBannerState,
+} = require("../utilities/taskBannerReminderCalculator");
 
 /**
  * Helper to compute changed fields for a task before & after edit
@@ -389,6 +400,9 @@ exports.createTask = async (req, res) => {
     let members = parseMembers(assignedMembers);
     members = members.filter(id => id.toString() !== userId.toString());
 
+    const isCompleted = (status || "").toLowerCase() === "completed";
+    const resolvedEndDate = isCompleted ? new Date() : undefined;
+
     // ── Member Statuses Tracking (Per-assignee accept/reject) ──
     let memberStatuses = undefined;
     if (members.length > 0) {
@@ -398,7 +412,7 @@ exports.createTask = async (req, res) => {
         status: status || "Assigned",
         rejectionReason: "",
         startDate: startDate === "" ? null : (startDate || null),
-        endDate: endDate === "" ? null : (endDate || null),
+        endDate: isCompleted ? resolvedEndDate : null,
         updatedAt: new Date()
       }));
     }
@@ -427,7 +441,7 @@ exports.createTask = async (req, res) => {
       priority: priority || "Mid",
       startDate: (startDate && startDate !== "") ? startDate : undefined,
       dueDate: dueDate === "" ? null : dueDate,
-      endDate: (endDate && endDate !== "") ? endDate : undefined,
+      endDate: resolvedEndDate,
       status: status || "Assigned",
       assignedStatus: assignedStatus || "Allocated",
       category: category || "",
@@ -462,21 +476,6 @@ exports.createTask = async (req, res) => {
           pages: task.pages,
         });
       }
-    }
-
-    // ── Upsert TaskMeta (Non-blocking) ──
-    if (taskData.category && taskData.category.trim()) {
-      const catTrim = taskData.category.trim();
-      const projTrim = taskData.project && taskData.project.trim() ? taskData.project.trim() : null;
-      const updateOp = projTrim
-        ? { $addToSet: { projects: projTrim } }
-        : { $setOnInsert: { projects: [] } };
-
-      TaskMeta.findOneAndUpdate(
-        { category: catTrim },
-        updateOp,
-        { upsert: true, new: true }
-      ).catch(err => serverLog("ERROR", CONTEXT, `TaskMeta update failed: ${err.message}`));
     }
 
     serverLog("INFO", CONTEXT, `Task created: ${task._id}`);
@@ -566,6 +565,12 @@ exports.updateTask = async (req, res) => {
     if (!task) {
       logResponse(CONTEXT, 404, "Task not found");
       return res.status(404).json({ message: "Task not found" });
+    }
+
+    // Prevent modifying or editing completed tasks
+    if ((task.status || "").toLowerCase().replace(/[\s\-_]/g, "") === "completed") {
+      logResponse(CONTEXT, 400, "Completed tasks cannot be modified");
+      return res.status(400).json({ message: "Completed tasks cannot be modified" });
     }
 
     // Prevent modifying or editing assigned tasks' assignment parameters after they have been accepted
@@ -709,7 +714,10 @@ exports.updateTask = async (req, res) => {
       );
 
       const parsedStartDate = updates.startDate !== undefined ? (updates.startDate ? new Date(updates.startDate) : null) : undefined;
-      const parsedEndDate = updates.endDate !== undefined ? (updates.endDate ? new Date(updates.endDate) : null) : undefined;
+      const isMemberCompleted = (incomingStatus || "").toLowerCase() === "completed";
+      const resolvedMemberEndDate = isMemberCompleted
+        ? (mStatuses[existingIndex]?.endDate || new Date())
+        : (incomingStatus ? null : (updates.endDate !== undefined ? (updates.endDate ? new Date(updates.endDate) : null) : undefined));
 
       if (existingIndex >= 0) {
         mStatuses[existingIndex] = {
@@ -717,7 +725,7 @@ exports.updateTask = async (req, res) => {
           ...(incomingAssignedStatus && { assignedStatus: incomingAssignedStatus }),
           ...(incomingStatus && { status: incomingStatus }),
           ...(parsedStartDate !== undefined && { startDate: parsedStartDate }),
-          ...(parsedEndDate !== undefined && { endDate: parsedEndDate }),
+          ...(resolvedMemberEndDate !== undefined && { endDate: resolvedMemberEndDate }),
           rejectionReason: incomingRejectionReason || mStatuses[existingIndex].rejectionReason || "",
           updatedAt: new Date()
         };
@@ -727,7 +735,7 @@ exports.updateTask = async (req, res) => {
           assignedStatus: incomingAssignedStatus || "Allocated",
           status: incomingStatus || "Assigned",
           startDate: parsedStartDate || null,
-          endDate: parsedEndDate || null,
+          endDate: resolvedMemberEndDate || null,
           rejectionReason: incomingRejectionReason,
           updatedAt: new Date()
         });
@@ -791,6 +799,16 @@ exports.updateTask = async (req, res) => {
         } else {
           updates.endDate = null;
         }
+      }
+    }
+
+    // Direct root status update (creator, admin, or unassigned task)
+    if (updates.status !== undefined) {
+      const isRootCompleted = (updates.status || "").toLowerCase() === "completed";
+      if (isRootCompleted) {
+        updates.endDate = task.endDate || new Date();
+      } else {
+        updates.endDate = null;
       }
     }
 
@@ -923,21 +941,7 @@ exports.updateTask = async (req, res) => {
           });
         }
       }
-    }
-
-    // ── Upsert TaskMeta (Non-blocking) ──
-    if (task.category && task.category.trim()) {
-      const catTrim = task.category.trim();
-      const projTrim = task.project && task.project.trim() ? task.project.trim() : null;
-      const updateOp = projTrim
-        ? { $addToSet: { projects: projTrim } }
-        : { $setOnInsert: { projects: [] } };
-
-      TaskMeta.findOneAndUpdate(
-        { category: catTrim },
-        updateOp,
-        { upsert: true, new: true }
-      ).catch(() => { });
+      await syncTaskWorkingDays(task._id);
     }
 
     serverLog("INFO", CONTEXT, "Task updated");
@@ -1092,6 +1096,12 @@ function buildDateFilter(query) {
 async function hydrateTasks(tasks, currentUserId = null) {
   const currentUserIdStr = currentUserId ? currentUserId.toString() : null;
 
+  const [holidaysSet, employeeLeavesSet, employeeCalendar] = await Promise.all([
+    fetchCompanyHolidaysSet(),
+    currentUserIdStr ? fetchEmployeeApprovedLeavesSet(currentUserIdStr) : Promise.resolve(new Set()),
+    currentUserIdStr ? getEmployeeWorkingCalendar(currentUserIdStr) : Promise.resolve(null),
+  ]);
+
   return Promise.all(tasks.map(async (task) => {
     const obj = task.toObject ? task.toObject() : { ...task };
 
@@ -1147,6 +1157,22 @@ async function hydrateTasks(tasks, currentUserId = null) {
       }
       // Remove any null/undefined entries from the array
       obj.assignedMembers = obj.assignedMembers.filter(Boolean);
+    }
+
+    // Attach eligible working days & deadline performance score
+    if (obj.dueDate) {
+      const sDate = obj.startDate || obj.createdDate || obj.createdAt;
+      const { eligibleDays, excludedDays } = calculateEligibleWorkingDays(sDate, obj.dueDate, holidaysSet, employeeLeavesSet);
+      const dlScore = calculateDeadlineScore(obj.dueDate, obj.endDate, obj.status, holidaysSet, employeeLeavesSet);
+      obj.eligibleWorkingDays = eligibleDays;
+      obj.excludedNonWorkingDays = excludedDays;
+      obj.eligibleDaysLate = dlScore.eligibleDaysLate;
+      obj.deadlineScore = dlScore.deadlineScore;
+
+      // Attach eligible working hours banner state (10am-7pm, skipping holidays, weekoffs, leaves, absences)
+      if (employeeCalendar) {
+        obj.bannerState = evaluateTaskBannerState(obj, employeeCalendar);
+      }
     }
 
     return obj;
@@ -1520,6 +1546,75 @@ exports.getTaskById = async (req, res) => {
 
     if (!Array.isArray(taskData.phases)) taskData.phases = [];
 
+    // Sync all phases from DailyWorkUpdates if historical/separate updates exist across dates
+    if (task.phases?.length > 0) {
+      const phaseIds = task.phases.map(p => p._id).filter(Boolean);
+      const linkedUpdates = await DailyWorkUpdate.find({
+        $or: [
+          { phaseId: { $in: phaseIds } },
+          { referenceId: { $in: phaseIds } }
+        ]
+      }).sort({ updateDate: 1, createdAt: 1 });
+
+      if (linkedUpdates.length > task.phases.length) {
+        const newPhases = [];
+        for (let i = 0; i < linkedUpdates.length; i++) {
+          const u = linkedUpdates[i];
+          let pId = u.phaseId;
+          if (newPhases.some(p => p._id && pId && p._id.toString() === pId.toString())) {
+            pId = u._id;
+            await DailyWorkUpdate.updateOne({ _id: u._id }, { $set: { phaseId: u._id } });
+          }
+          newPhases.push({
+            _id: pId || u._id,
+            phaseTitle: u.title || `Phase ${i + 1}`,
+            phaseDescription: u.description || "",
+            phaseStatus: u.status || "inprocess",
+            updateDate: u.updateDate || u.createdAt,
+            employeeId: u.userId,
+            workingDays: 1
+          });
+        }
+        task.phases = newPhases;
+        task.markModified("phases");
+        await task.save();
+        taskData.phases = task.phases.map(p => (typeof p.toObject === "function" ? p.toObject() : p));
+      }
+    }
+
+    // Ensure phase working days are fresh and stored in database
+    if (task.phases?.length > 0) {
+      const syncResult = await syncTaskWorkingDays(task);
+      if (syncResult?.task?.phases) {
+        taskData.phases.forEach((p) => {
+          const syncedP = syncResult.task.phases.find(sp => sp._id?.toString() === p._id?.toString());
+          if (syncedP) {
+            p.workingDays = syncedP.workingDays || 0;
+          }
+        });
+      }
+    }
+
+    // Attach eligible working days & deadline performance score
+    if (taskData.dueDate) {
+      const holidaysSet = await fetchCompanyHolidaysSet();
+      const employeeLeavesSet = currentUserIdStr
+        ? await fetchEmployeeApprovedLeavesSet(currentUserIdStr)
+        : new Set();
+      const sDate = taskData.startDate || taskData.createdDate || taskData.createdAt;
+      const { eligibleDays, excludedDays } = calculateEligibleWorkingDays(sDate, taskData.dueDate, holidaysSet, employeeLeavesSet);
+      const dlScore = calculateDeadlineScore(taskData.dueDate, taskData.endDate, taskData.status, holidaysSet, employeeLeavesSet);
+      taskData.eligibleWorkingDays = eligibleDays;
+      taskData.excludedNonWorkingDays = excludedDays;
+      taskData.eligibleDaysLate = dlScore.eligibleDaysLate;
+      taskData.deadlineScore = dlScore.deadlineScore;
+
+      if (currentUserIdStr) {
+        const cal = await getEmployeeWorkingCalendar(currentUserIdStr);
+        taskData.bannerState = evaluateTaskBannerState(taskData, cal);
+      }
+    }
+
     const elapsed = Date.now() - startTime;
     logResponse(CONTEXT, 200, "Task fetched successfully", { elapsedMs: elapsed });
 
@@ -1851,7 +1946,34 @@ exports.getProjectPhases = async (req, res) => {
       };
     });
 
-    res.json({ success: true, data: allWorkData });
+    let holidaysList = [];
+    try {
+      const Holiday = require("../Models/Holiday.model");
+      const hols = await Holiday.find({}).lean();
+      holidaysList = hols
+        .map((h) => {
+          if (!h.date) return null;
+          const d = new Date(h.date);
+          return !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : null;
+        })
+        .filter(Boolean);
+    } catch (hErr) {
+      console.error("Error fetching holidays in getProjectPhases:", hErr);
+    }
+
+    let empLeaves = [];
+    try {
+      const Attendance = require("../Models/Attendance.model");
+      const atts = await Attendance.find({
+        employeeId: userId,
+        status: { $in: ["Absent", "Leave", "On Leave"] },
+      }).lean();
+      empLeaves = atts.map((a) => a.date).filter(Boolean);
+    } catch (aErr) {
+      console.error("Error fetching attendance in getProjectPhases:", aErr);
+    }
+
+    res.json({ success: true, data: allWorkData, holidays: holidaysList, leaves: empLeaves });
   } catch (error) {
     console.error("GET PROJECT PHASES ERROR:", error);
     res.status(500).json({ success: false, message: error.message });
@@ -1875,6 +1997,10 @@ exports.updateTaskPhase = async (req, res) => {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
+    if ((task.status || "").toLowerCase().replace(/[\s\-_]/g, "") === "completed") {
+      return res.status(400).json({ success: false, message: "Completed task phases cannot be modified" });
+    }
+
     if (!task.phases || !Array.isArray(task.phases)) {
       return res.status(400).json({ success: false, message: "Task has no phases" });
     }
@@ -1882,6 +2008,10 @@ exports.updateTaskPhase = async (req, res) => {
     const phase = task.phases.id(phaseId);
     if (!phase) {
       return res.status(404).json({ success: false, message: "Phase not found" });
+    }
+
+    if ((phase.phaseStatus || "").toLowerCase() === "completed") {
+      return res.status(400).json({ success: false, message: "Completed phase cannot be modified" });
     }
 
     // Update phase in Task model
@@ -1934,7 +2064,11 @@ exports.updateTaskPhase = async (req, res) => {
       });
     }
 
-    res.json({ success: true, message: "Phase and daily work updates synced successfully", data: phase });
+    await syncTaskWorkingDays(task._id);
+    const refreshedTask = await Task.findById(taskId);
+    const refreshedPhase = refreshedTask?.phases?.id(phaseId) || phase;
+
+    res.json({ success: true, message: "Phase and daily work updates synced successfully", data: refreshedPhase });
   } catch (error) {
     console.error("UPDATE TASK PHASE ERROR:", error);
     res.status(500).json({ success: false, message: error.message });
@@ -2062,21 +2196,6 @@ exports.editAssignedTaskBeforeAccept = async (req, res) => {
     }
 
     await task.save();
-
-    // ── Upsert TaskMeta (Non-blocking) ──
-    if (task.category && task.category.trim()) {
-      const catTrim = task.category.trim();
-      const projTrim = task.project && task.project.trim() ? task.project.trim() : null;
-      const updateOp = projTrim
-        ? { $addToSet: { projects: projTrim } }
-        : { $setOnInsert: { projects: [] } };
-
-      TaskMeta.findOneAndUpdate(
-        { category: catTrim },
-        updateOp,
-        { upsert: true, new: true }
-      ).catch(() => { });
-    }
 
     // ── Audit & Activity Logging (Only log if fields were edited) ──
     const currentUserName = req.user?.name || "User";

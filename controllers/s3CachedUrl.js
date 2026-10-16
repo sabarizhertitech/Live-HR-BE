@@ -617,6 +617,36 @@ const updateEmployeeDetails = async (req, res) => {
       empUpdate.phone = req.body.phone ?? employee.phone;
       empUpdate.department = req.body.department ?? employee.department;
       empUpdate.designation = req.body.designation ?? employee.designation;
+      if (req.body.gender !== undefined) {
+        const g = req.body.gender.toString().toLowerCase().trim();
+        if (["male", "female", "other"].includes(g)) {
+          empUpdate.gender = g;
+        }
+      }
+    } else {
+      if (allowedFields === null || allowedFields.has("gender")) {
+        if (req.body.gender !== undefined) {
+          const g = req.body.gender.toString().toLowerCase().trim();
+          if (["male", "female", "other"].includes(g)) {
+            empUpdate.gender = g;
+          }
+        }
+      }
+      if (allowedFields === null || allowedFields.has("phone")) {
+        if (req.body.phone !== undefined) empUpdate.phone = req.body.phone;
+      }
+      if (allowedFields === null || allowedFields.has("department")) {
+        if (req.body.department !== undefined) empUpdate.department = req.body.department;
+      }
+      if (allowedFields === null || allowedFields.has("designation")) {
+        if (req.body.designation !== undefined) empUpdate.designation = req.body.designation;
+      }
+      if (allowedFields === null || allowedFields.has("name")) {
+        if (req.body.name !== undefined) empUpdate.name = req.body.name;
+      }
+      if (allowedFields === null || allowedFields.has("email")) {
+        if (req.body.email !== undefined) empUpdate.email = req.body.email;
+      }
     }
 
     if (isFirstTime && merged.profileCompletion >= 100) {
@@ -688,6 +718,7 @@ const getEmployeeDetails = async (req, res) => {
       ...detailsObj,
       // Employee is PRIMARY source — always wins over EmployeeDetails
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       dob: details.dob ? new Date(details.dob) : null,
       isBirthdayToday,
       empId: employee.empId,
@@ -786,6 +817,7 @@ const getMyProfileWithSignedUrls = async (req, res) => {
       ...detailsObj2,
       // Employee is PRIMARY source — always wins over EmployeeDetails
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       empId: employee.empId,
       empIdString: employee.empId,
       picture: details.picture || employee.photo,
@@ -1106,6 +1138,13 @@ const adminUpdateEmployee = async (req, res) => {
       }
     });
 
+    if (update.gender !== undefined) {
+      const g = update.gender.toString().toLowerCase().trim();
+      if (["male", "female", "other"].includes(g)) {
+        employeeUpdate.gender = g;
+      }
+    }
+
     if (update.status === "relieved") {
       await Employee.findByIdAndUpdate(employee._id, {
         $set: {
@@ -1209,6 +1248,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
       ...detailsObj3,
       // Employee wins on all core fields
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       empIdString: employee.empId,
       dateRelieved: employee.dateRelieved,
     };

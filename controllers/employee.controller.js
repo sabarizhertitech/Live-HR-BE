@@ -19,6 +19,7 @@ const {
   maskAccountNumber
 } = require("../utilities/secureEncryption");
 const { checkProfileRestriction } = require("../utils/profileRestriction");
+const { expandAllowedFields } = require("../utilities/editFieldsHelper");
 
 
 const uploadFileToS3 = async (file, empIdString) => {
@@ -72,6 +73,24 @@ const attachSignedUrls = async (dataObj) => {
           }
         }
         return { ...course, certificateUrl: course.certificateUrl || null };
+      })
+    );
+  }
+
+  /* professionalCertifications certificate urls */
+  if (Array.isArray(dataObj.professionalCertifications)) {
+    dataObj.professionalCertifications = await Promise.all(
+      dataObj.professionalCertifications.map(async (cert) => {
+        const certObj = cert.toObject ? cert.toObject() : { ...cert };
+        if (certObj.certificate && typeof certObj.certificate === "string") {
+          try {
+            const url = await getCachedSignedUrl(certObj.certificate);
+            return { ...certObj, certificateUrl: url };
+          } catch {
+            return { ...certObj, certificateUrl: null };
+          }
+        }
+        return { ...certObj, certificateUrl: certObj.certificateUrl || null };
       })
     );
   }
@@ -218,6 +237,10 @@ const calculateProfileCompletion = (data, employee = null) => {
     );
   }
 
+  if (resolvedData.hasCertifications === "yes") {
+    requiredFields.push({ field: "professionalCertifications", weight: 3 });
+  }
+
   let total = 0;
   let completed = 0;
 
@@ -284,7 +307,7 @@ const updateEmployeeDetails = async (req, res) => {
       }
 
       if (!approvedRequest.approvedFields.includes("ALL")) {
-        allowedFields = new Set(approvedRequest.approvedFields);
+        allowedFields = new Set(expandAllowedFields(approvedRequest.approvedFields));
       }
     }
 
@@ -623,6 +646,76 @@ const updateEmployeeDetails = async (req, res) => {
       usedFields.push("courses");
     }
 
+    /* ───────── PROFESSIONAL CERTIFICATIONS ───────── */
+    if (input.hasCertifications !== undefined) {
+      updateData.hasCertifications = input.hasCertifications;
+      usedFields.push("courses");
+    }
+
+    if (input.hasCertifications === "no") {
+      delete updateData.professionalCertifications;
+      if (details) {
+        details.set("professionalCertifications", undefined);
+      }
+    } else if (input.professionalCertifications !== undefined) {
+      let parsedCerts = [];
+      try {
+        parsedCerts =
+          typeof input.professionalCertifications === "string"
+            ? JSON.parse(input.professionalCertifications)
+            : input.professionalCertifications;
+      } catch {
+        parsedCerts = [];
+      }
+
+      if (Array.isArray(parsedCerts) && parsedCerts.length > 0) {
+        const existingCerts = Array.isArray(details?.professionalCertifications)
+          ? details.professionalCertifications
+          : [];
+
+        updateData.professionalCertifications = await Promise.all(
+          parsedCerts.map(async (cert, idx) => {
+            let certKey = null;
+            const certFile =
+              files[`cert_${idx}_certificate`]?.[0] ||
+              files[`cert_${cert.id}_certificate`]?.[0] ||
+              files[`cert_${cert._id}_certificate`]?.[0];
+
+            if (certFile?.buffer) {
+              const ext = certFile.originalname.split(".").pop();
+              const key = `ProfileDocs/${employee.empId}/cert_${idx}_${Date.now()}.${ext}`;
+              await uploadToS3(certFile.buffer, key, certFile.mimetype);
+              certKey = key;
+            }
+
+            const existingMatch =
+              existingCerts.find(
+                (ec) =>
+                  (ec.id && cert.id && String(ec.id) === String(cert.id)) ||
+                  (ec._id && cert._id && String(ec._id) === String(cert._id)) ||
+                  (ec.courseName && cert.courseName && ec.courseName === cert.courseName)
+              ) || existingCerts[idx];
+
+            return {
+              ...cert,
+              certificate:
+                certKey ||
+                (typeof cert.certificate === "string" ? cert.certificate : null) ||
+                existingMatch?.certificate ||
+                null,
+            };
+          })
+        );
+        usedFields.push("courses");
+      } else {
+        // Do NOT store empty array in DB
+        delete updateData.professionalCertifications;
+        if (details) {
+          details.set("professionalCertifications", undefined);
+        }
+      }
+    }
+
     /* ───────── CAREER GAPS (Eligible Transitions Only) ───────── */
     const shouldCheckCareerGaps =
       input.careerGaps !== undefined ||
@@ -735,6 +828,16 @@ const updateEmployeeDetails = async (req, res) => {
       ...existingDetails,
       ...updateData,
     };
+    if (
+      input.hasCertifications === "no" ||
+      (input.professionalCertifications !== undefined &&
+        (!updateData.professionalCertifications || updateData.professionalCertifications.length === 0))
+    ) {
+      delete merged.professionalCertifications;
+      if (details) {
+        details.set("professionalCertifications", undefined);
+      }
+    }
     merged.profileCompletion = calculateProfileCompletion({
       ...merged,
       // Inject Employee fields for completion calculation without saving them
@@ -808,6 +911,36 @@ const updateEmployeeDetails = async (req, res) => {
       empUpdate.phone = req.body.phone ?? employee.phone;
       empUpdate.department = req.body.department ?? employee.department;
       empUpdate.designation = req.body.designation ?? employee.designation;
+      if (req.body.gender !== undefined) {
+        const g = req.body.gender.toString().toLowerCase().trim();
+        if (["male", "female", "other"].includes(g)) {
+          empUpdate.gender = g;
+        }
+      }
+    } else {
+      if (allowedFields === null || allowedFields.has("gender")) {
+        if (req.body.gender !== undefined) {
+          const g = req.body.gender.toString().toLowerCase().trim();
+          if (["male", "female", "other"].includes(g)) {
+            empUpdate.gender = g;
+          }
+        }
+      }
+      if (allowedFields === null || allowedFields.has("phone")) {
+        if (req.body.phone !== undefined) empUpdate.phone = req.body.phone;
+      }
+      if (allowedFields === null || allowedFields.has("department")) {
+        if (req.body.department !== undefined) empUpdate.department = req.body.department;
+      }
+      if (allowedFields === null || allowedFields.has("designation")) {
+        if (req.body.designation !== undefined) empUpdate.designation = req.body.designation;
+      }
+      if (allowedFields === null || allowedFields.has("name")) {
+        if (req.body.name !== undefined) empUpdate.name = req.body.name;
+      }
+      if (allowedFields === null || allowedFields.has("email")) {
+        if (req.body.email !== undefined) empUpdate.email = req.body.email;
+      }
     }
 
     const wasRejected = details?.profileApprovalStatus === "rejected" || employee?.profileApprovalStatus === "rejected";
@@ -950,11 +1083,13 @@ const getEmployeeDetails = async (req, res) => {
       ...detailsObj,
       // Employee is PRIMARY source — always wins over EmployeeDetails
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       profileApprovalStatus: approvalStatus,
       rejectionRemark: details.rejectionRemark || "",
       rejectedFields: details.rejectedFields || [],
       submittedForApprovalAt: details.submittedForApprovalAt || null,
-      reviewedAt: details.reviewedAt || null,
+      reviewedAt: details.reviewedAt || employee.profileRejectedAt || null,
+      profileRejectedAt: employee.profileRejectedAt || details.reviewedAt || null,
       dob: details.dob ? new Date(details.dob) : null,
       isBirthdayToday,
       empId: employee.empId,
@@ -1038,7 +1173,7 @@ const getEmployeeDetails = async (req, res) => {
         if (foundGaps && foundGaps.length > 0) {
           responseData.careerGaps = foundGaps;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     if (Array.isArray(responseData.careerGaps)) {
       responseData.careerGaps = responseData.careerGaps.filter(
@@ -1094,11 +1229,13 @@ const getMyProfileWithSignedUrls = async (req, res) => {
       profileCompletion: calculatedCompletion,
       // Employee is PRIMARY source — always wins over EmployeeDetails
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       profileApprovalStatus: approvalStatus2,
       rejectionRemark: details.rejectionRemark || "",
       rejectedFields: details.rejectedFields || [],
       submittedForApprovalAt: details.submittedForApprovalAt || null,
-      reviewedAt: details.reviewedAt || null,
+      reviewedAt: details.reviewedAt || employee.profileRejectedAt || null,
+      profileRejectedAt: employee.profileRejectedAt || details.reviewedAt || null,
       empId: employee.empId,
       empIdString: employee.empId,
       picture: details.picture || employee.photo,
@@ -1319,7 +1456,7 @@ const adminUpdateEmployee = async (req, res) => {
       }
     }
     /* ── Safe JSON parsing ── */
-    const jsonFields = ["siblings", "previousExperiences", "courses", "careerGaps"];
+    const jsonFields = ["siblings", "previousExperiences", "courses", "careerGaps", "professionalCertifications"];
     jsonFields.forEach((field) => {
       if (update[field] && typeof update[field] === "string") {
         try {
@@ -1329,6 +1466,13 @@ const adminUpdateEmployee = async (req, res) => {
         }
       }
     });
+
+    if (Array.isArray(update.professionalCertifications)) {
+      if (update.professionalCertifications.length === 0) {
+        delete update.professionalCertifications;
+        if (details) details.professionalCertifications = undefined;
+      }
+    }
 
     if (Array.isArray(update.courses)) {
       update.courses = update.courses.map((c) => {
@@ -1507,6 +1651,13 @@ const adminUpdateEmployee = async (req, res) => {
       }
     });
 
+    if (update.gender !== undefined) {
+      const g = update.gender.toString().toLowerCase().trim();
+      if (["male", "female", "other"].includes(g)) {
+        employeeUpdate.gender = g;
+      }
+    }
+
     if (update.status === "relieved" || update.employmentStatus === "relieved") {
       await Employee.findByIdAndUpdate(employee._id, {
         $set: {
@@ -1648,6 +1799,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
       profileCompletion: calculatedCompletion,
       // Employee wins on all core fields
       ...employee.toObject(),
+      gender: details.gender || employee.gender || "male",
       profileApprovalStatus: approvalStatus3,
       rejectionRemark: details.rejectionRemark || "",
       rejectedFields: details.rejectedFields || [],
@@ -1722,7 +1874,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
         if (foundGaps && foundGaps.length > 0) {
           responseData.careerGaps = foundGaps;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
     if (Array.isArray(responseData.careerGaps)) {
       responseData.careerGaps = responseData.careerGaps.filter(
@@ -1815,6 +1967,9 @@ const getProfileCompletion = async (req, res) => {
       dateJoined: employee?.dateJoined,
       createdAt: employee?.createdAt,
       empId: employee?.empId || req.user?.empId,
+      profileApprovalStatus: details?.profileApprovalStatus || employee?.profileApprovalStatus,
+      reviewedAt: details?.reviewedAt,
+      profileRejectedAt: employee?.profileRejectedAt,
     });
 
     res.json({
@@ -1822,7 +1977,11 @@ const getProfileCompletion = async (req, res) => {
       profileCompletion: calculatedCompletion,
       isProfileRestricted: restriction.isRestricted,
       daysRemaining: restriction.daysRemaining,
+      isLastDay: restriction.isLastDay,
       isNewEmployee: restriction.isNewEmployee,
+      isRejected: restriction.isRejected,
+      profileApprovalStatus: details?.profileApprovalStatus || employee?.profileApprovalStatus,
+      reviewedAt: details?.reviewedAt || employee?.profileRejectedAt || null,
       dateJoined: employee?.dateJoined,
       isProfileCompleted: employee?.isProfileCompleted || calculatedCompletion >= 100,
       deadline: restriction.deadline,
@@ -1965,7 +2124,7 @@ const getReceivedWishes = async (req, res) => {
         if (w.senderId?.photo && w.senderId?.photo !== "avatar.png") {
           try {
             avatarUrl = await getCachedSignedUrl(w.senderId.photo);
-          } catch (e) {}
+          } catch (e) { }
         }
         return {
           ...w,
@@ -2229,6 +2388,7 @@ const adminReviewProfile = async (req, res) => {
         $set: {
           isProfileCompleted: false,
           profileApprovalStatus: "rejected",
+          profileRejectedAt: new Date(),
         },
       });
 
@@ -2276,6 +2436,125 @@ const adminReviewProfile = async (req, res) => {
   }
 };
 
+const saveCertifications = async (req, res) => {
+  try {
+    const employeeId = req.user.id || req.user._id;
+    const employee = await Employee.findById(employeeId);
+    if (!employee) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
+    }
+
+    let details = await EmployeeDetails.findOne({ empId: employeeId });
+    if (!details) {
+      details = new EmployeeDetails({ empId: employeeId });
+    }
+
+    const { hasCertifications, professionalCertifications } = req.body;
+
+    if (hasCertifications !== undefined) {
+      details.hasCertifications = hasCertifications;
+    }
+
+    if (hasCertifications === "no") {
+      details.set("professionalCertifications", undefined);
+    } else if (professionalCertifications !== undefined) {
+      let parsed = [];
+      try {
+        parsed =
+          typeof professionalCertifications === "string"
+            ? JSON.parse(professionalCertifications)
+            : professionalCertifications;
+      } catch (e) {
+        parsed = [];
+      }
+
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const files = req.files
+          ? req.files.reduce((acc, f) => {
+              acc[f.fieldname] = acc[f.fieldname] || [];
+              acc[f.fieldname].push(f);
+              return acc;
+            }, {})
+          : {};
+
+        const existingCerts = Array.isArray(details.professionalCertifications)
+          ? details.professionalCertifications
+          : [];
+
+        const updatedCerts = await Promise.all(
+          parsed.map(async (cert, idx) => {
+            let certKey = null;
+            const certFile =
+              files[`cert_${idx}_certificate`]?.[0] ||
+              files[`cert_${cert.id}_certificate`]?.[0] ||
+              files[`cert_${cert._id}_certificate`]?.[0];
+
+            if (certFile?.buffer) {
+              const ext = certFile.originalname.split(".").pop();
+              const key = `ProfileDocs/${employee.empId}/cert_${idx}_${Date.now()}.${ext}`;
+              await uploadToS3(certFile.buffer, key, certFile.mimetype);
+              certKey = key;
+            }
+
+            const existingMatch =
+              existingCerts.find(
+                (ec) =>
+                  (ec.id && cert.id && String(ec.id) === String(cert.id)) ||
+                  (ec._id && cert._id && String(ec._id) === String(cert._id)) ||
+                  (ec.courseName && cert.courseName && ec.courseName === cert.courseName)
+              ) || existingCerts[idx];
+
+            return {
+              courseName: cert.courseName || "",
+              startMonthYear: cert.startMonthYear || "",
+              endMonthYear: cert.endMonthYear || "",
+              courseDuration: cert.courseDuration || "",
+              durationValue: cert.durationValue || "",
+              durationUnit: cert.durationUnit || cert.durationType || "Months",
+              durationType: cert.durationType || cert.durationUnit || "Months",
+              courseType: cert.courseType || "",
+              institutionName: cert.institutionName || "",
+              certificate:
+                certKey ||
+                (typeof cert.certificate === "string" ? cert.certificate : null) ||
+                existingMatch?.certificate ||
+                null,
+            };
+          })
+        );
+        details.professionalCertifications = updatedCerts;
+      } else {
+        details.set("professionalCertifications", undefined);
+      }
+    }
+
+    const detailsObj = details.toObject();
+    details.profileCompletion = calculateProfileCompletion(
+      {
+        ...detailsObj,
+        phone: employee.phone,
+        status: employee.status,
+      },
+      employee
+    );
+
+    await details.save();
+
+    const signedDetails = await attachSignedUrls(details.toObject());
+
+    return res.json({
+      success: true,
+      message: "Certifications saved successfully",
+      hasCertifications: details.hasCertifications,
+      professionalCertifications: signedDetails.professionalCertifications || [],
+      profileCompletion: details.profileCompletion,
+    });
+  } catch (err) {
+    console.error("Error auto-saving certifications:", err);
+    return res.status(500).json({ success: false, message: "Failed to save certifications" });
+  }
+};
+
 module.exports = {
   updateEmployeeDetails,
   getEmployeeDetails,
@@ -2292,6 +2571,7 @@ module.exports = {
   getUserSentWishes,
   getDocumentViewUrl,
   adminReviewProfile,
+  saveCertifications,
 };
 
 const apiLogger = require('../utils/apiLogger');

@@ -58,6 +58,7 @@ const taskSchema = new mongoose.Schema(
           phaseStatus: { type: String, default: "pending" },
           updateDate: { type: Date, default: Date.now },
           employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
+          workingDays: { type: Number, default: 0 },
         }
       ],
       default: undefined

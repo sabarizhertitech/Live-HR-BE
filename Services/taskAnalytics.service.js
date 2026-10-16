@@ -22,6 +22,13 @@ const {
   calculateConsistencyScore,
   getRankingEligibility,
 } = require("../utils/taskAnalytics.utils");
+const {
+  fetchCompanyHolidaysSet,
+  fetchEmployeeApprovedLeavesSet,
+  fetchTeamApprovedLeavesMap,
+  calculateEligibleWorkingDays,
+  calculateDeadlineScore,
+} = require("../utilities/taskDeadlineCalculator");
 
 /**
  * Safely extracts a clean ObjectId hex string from an ID or populated document.
@@ -145,7 +152,7 @@ function buildDateQuery(period, customStart, customEnd) {
  * from memberStatuses for that employee (with clean fallback for single-assignee).
  * ─────────────────────────────────────────────────────────────────────────────
  */
-function calculateEmployeeTaskMetrics(task, employeeId, now = new Date()) {
+function calculateEmployeeTaskMetrics(task, employeeId, now = new Date(), holidaysSet = new Set(), employeeLeavesSet = new Set()) {
   const empIdStr = String(employeeId);
   const memberStatuses = Array.isArray(task.memberStatuses) ? task.memberStatuses : [];
 
@@ -289,6 +296,16 @@ function calculateEmployeeTaskMetrics(task, employeeId, now = new Date()) {
   const pendingPhases = totalPhases - completedPhases;
   const phaseCompletionRate = calculatePercentage(completedPhases, totalPhases);
 
+  // Eligible working days & Deadline Score (skipping Sundays, 2nd & 4th Saturdays, company holidays, approved leaves)
+  const { eligibleDays: eligibleWorkingDays, excludedDays: excludedNonWorkingDays } =
+    hasValidStart && hasValidDue
+      ? calculateEligibleWorkingDays(startDate, dueDate, holidaysSet, employeeLeavesSet)
+      : { eligibleDays: null, excludedDays: 0 };
+
+  const deadlineScoreDetails = hasValidDue
+    ? calculateDeadlineScore(dueDate, endDate, status, holidaysSet, employeeLeavesSet, now)
+    : { eligibleDaysLate: 0, deadlineScore: 100, isAhead: false, isOnTime: true, isLate: false, isOverdue: false, excludedLateDays: 0 };
+
   return {
     taskId: task._id,
     employeeId: empIdStr,
@@ -327,6 +344,11 @@ function calculateEmployeeTaskMetrics(task, employeeId, now = new Date()) {
     ahead,
     late,
     overdue,
+
+    eligibleWorkingDays,
+    excludedNonWorkingDays,
+    eligibleDaysLate: deadlineScoreDetails.eligibleDaysLate,
+    deadlineScore: deadlineScoreDetails.deadlineScore,
 
     phases: {
       total: totalPhases,
@@ -440,9 +462,15 @@ async function getEmployeePerformance(employeeId, filters = {}) {
 
   const now = new Date();
 
+  // Fetch company holidays and employee's approved leaves
+  const [holidaysSet, employeeLeavesSet] = await Promise.all([
+    fetchCompanyHolidaysSet(),
+    fetchEmployeeApprovedLeavesSet(empObjId),
+  ]);
+
   // 4. Calculate Individual Task Metrics
   const mappedTasks = rawTasks.map((task) => {
-    return calculateEmployeeTaskMetrics(task, empObjId, now);
+    return calculateEmployeeTaskMetrics(task, empObjId, now, holidaysSet, employeeLeavesSet);
   });
 
   // Filter by task status if requested
@@ -534,6 +562,17 @@ async function getEmployeePerformance(employeeId, filters = {}) {
   const deadlineReliability = onTimeRate; // Ahead + OnTime / Completed
 
   const phaseCompletionRate = calculatePercentage(completedPhasesSum, totalPhasesSum);
+
+  // Separate Deadline Score: average across valid performance tasks
+  const validDeadlineTasks = filteredTasks.filter((t) => !t.rejected);
+  const deadlineScore = validDeadlineTasks.length > 0
+    ? Number(
+        (
+          validDeadlineTasks.reduce((sum, t) => sum + (t.deadlineScore !== undefined ? t.deadlineScore : 100), 0) /
+          validDeadlineTasks.length
+        ).toFixed(1)
+      )
+    : 100;
 
   // Time Analysis
   const avgCompletionMs = totalDurationsCount > 0 ? Math.round(totalCompletedDurationMs / totalDurationsCount) : 0;
@@ -627,9 +666,11 @@ async function getEmployeePerformance(employeeId, filters = {}) {
       ahead,
       onTime: exactlyOnTime,
       late,
+      deadlineScore,
     },
     performance: {
       score: performanceScore,
+      deadlineScore, // Separated deadline performance score (0 - 100)
       completionRate,
       onTimeRate,
       lateRate,
@@ -717,6 +758,12 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
     .lean();
 
   const now = new Date();
+
+  // Fetch company holidays and team members' approved leaves
+  const [holidaysSet, teamLeavesMap] = await Promise.all([
+    fetchCompanyHolidaysSet(),
+    fetchTeamApprovedLeavesMap(allEmployees.map((e) => e._id)),
+  ]);
 
   // 3. Aggregate Team Totals
   let teamTotalTasks = tasks.length;
@@ -813,7 +860,8 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
 
     for (const empId of uniqueAssignees) {
       if (employeeTaskMetrics.has(empId)) {
-        const empMetrics = calculateEmployeeTaskMetrics(task, empId, now);
+        const empLeavesSet = teamLeavesMap.get(empId) || new Set();
+        const empMetrics = calculateEmployeeTaskMetrics(task, empId, now, holidaysSet, empLeavesSet);
         employeeTaskMetrics.get(empId).tasks.push(empMetrics);
       }
     }
@@ -840,6 +888,9 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
     let phasesTot = 0;
     let phasesComp = 0;
 
+    let deadlineScoresSum = 0;
+    let deadlineTasksCount = 0;
+
     for (const t of empTasks) {
       if (t.completed) comp++;
       else if (t.inProgress) inProg++;
@@ -850,6 +901,11 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
       if (t.onTime) onTm++;
       if (t.late) late++;
 
+      if (!t.rejected && t.deadlineScore !== undefined) {
+        deadlineScoresSum += t.deadlineScore;
+        deadlineTasksCount++;
+      }
+
       if (t.completed && t.actualDuration) {
         totalDurMs += t.actualDuration.totalMs;
         durCount++;
@@ -858,6 +914,10 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
       phasesTot += t.phases.total;
       phasesComp += t.phases.completed;
     }
+
+    const empDeadlineScore = deadlineTasksCount > 0
+      ? Number((deadlineScoresSum / deadlineTasksCount).toFixed(1))
+      : 100;
 
     const validPerformanceTasks = Math.max(0, total - rej);
     const compRate = calculatePercentage(comp, validPerformanceTasks);
@@ -907,6 +967,7 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
       averageCompletionHours: Number((avgMs / 3600000).toFixed(1)),
       averageCompletionFormatted: formatDuration(avgMs),
       performanceScore: perfScore,
+      deadlineScore: empDeadlineScore,
       rankingEligible: rankingEligibility.rankingEligible,
       confidence: rankingEligibility.confidence,
       confidenceLabel: rankingEligibility.label,
@@ -957,6 +1018,10 @@ async function getTeamPerformance(filters = {}, userRole = "admin", currentUserI
       teamOnTimeRate,
       teamOverdueRate,
       averageEligibleScore: avgEligibleScore,
+      averageDeadlineScore: (() => {
+        const totalDl = employeeSummaries.reduce((acc, e) => acc + (e.deadlineScore !== undefined ? e.deadlineScore : 100), 0);
+        return employeeSummaries.length > 0 ? Number((totalDl / employeeSummaries.length).toFixed(1)) : 100;
+      })(),
     },
     rankedEmployees,
     projects: Object.values(projectStats),

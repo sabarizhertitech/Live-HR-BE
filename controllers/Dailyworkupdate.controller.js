@@ -3,6 +3,7 @@ const Task = require("../Models/task.model");
 const Employee = require('../Models/Employee');
 const mongoose = require("mongoose");
 const TaskMeta = require("../Models/TaskMeta.model");
+const { syncTaskWorkingDays, calculateOverallTaskWorkingDays } = require("../utilities/workingDaysCalculator");
 
 /* ─────────────────────────────────────────────────────────
    POST  /daily-update
@@ -32,7 +33,7 @@ exports.createDailyUpdate = async (req, res) => {
 
     // Support multiple client request formats for Task ID (task, taskId, task_id)
     const resolvedTaskId = req.body.task || req.body.taskId || req.body.task_id;
-    const isExplicitStandalone = resolvedTaskId === "standalone" || req.body.isNewTask === true;
+    const isExplicitStandalone = resolvedTaskId === "standalone" || req.body.isNewTask === true || (!resolvedTaskId && !req.body.phaseId && !req.body.taskPhaseId);
     let task;
     if (!isExplicitStandalone && resolvedTaskId && mongoose.Types.ObjectId.isValid(resolvedTaskId)) {
       // Check if task exists in DB; if not, remove/set to undefined immediately
@@ -77,6 +78,39 @@ exports.createDailyUpdate = async (req, res) => {
       }
     }
 
+    if (!isExplicitStandalone && !parentTask && category && project) {
+      const catTrim = category.trim();
+      const projTrim = project.trim();
+      const catRegex = new RegExp(`^${catTrim}$`, "i");
+      const projRegex = new RegExp(`^${projTrim}$`, "i");
+
+      let matchedTask = null;
+      if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+        matchedTask = await Task.findOne({
+          category: { $regex: catRegex },
+          project: { $regex: projRegex },
+          $or: [
+            { assignedMembers: userId },
+            { createdBy: userId }
+          ]
+        }).sort({ createdAt: -1 });
+      }
+
+      if (!matchedTask) {
+        matchedTask = await Task.findOne({
+          category: { $regex: catRegex },
+          project: { $regex: projRegex }
+        }).sort({ createdAt: -1 });
+      }
+
+      if (matchedTask) {
+        parentTask = matchedTask;
+        task = parentTask._id;
+        if (!category && parentTask.category) category = parentTask.category;
+        if (!project && parentTask.project) project = parentTask.project;
+      }
+    }
+
     if (!userId) {
       return res.status(400).json({ success: false, message: "Could not determine user ID (updatedBy)" });
     }
@@ -93,7 +127,7 @@ exports.createDailyUpdate = async (req, res) => {
 
     // Match the target phase before saving the update entry
     let targetPhase = null;
-    if (parentTask) {
+    if (!isExplicitStandalone && parentTask) {
       if (resolvedPhaseId && Array.isArray(parentTask.phases)) {
         targetPhase = parentTask.phases.id(resolvedPhaseId);
       }
@@ -105,7 +139,12 @@ exports.createDailyUpdate = async (req, res) => {
         );
       }
 
-      // Fallback 2: If phase array is non-empty, use the last active phase (ONLY if no finalTitle is provided)
+      // Fallback 2: If task has exactly 1 phase, match it
+      if (!targetPhase && Array.isArray(parentTask.phases) && parentTask.phases.length === 1) {
+        targetPhase = parentTask.phases[0];
+      }
+
+      // Fallback 3: If phase array is non-empty, use the last active phase (ONLY if no finalTitle is provided)
       if (!targetPhase && !finalTitle && Array.isArray(parentTask.phases) && parentTask.phases.length > 0) {
         for (let i = parentTask.phases.length - 1; i >= 0; i--) {
           if (["pending", "inprocess"].includes(parentTask.phases[i].phaseStatus?.toLowerCase())) {
@@ -151,14 +190,17 @@ exports.createDailyUpdate = async (req, res) => {
 
     // 🌟 STORE REFERENCED phaseId directly in entryData ONLY if linked to an actual Task Phase
     let finalPhaseId = null;
-    if (targetPhase) {
+    if (!isExplicitStandalone && targetPhase) {
       finalPhaseId = targetPhase._id;
-    } else if (resolvedPhaseId && mongoose.Types.ObjectId.isValid(resolvedPhaseId) && parentTask) {
+    } else if (!isExplicitStandalone && resolvedPhaseId && mongoose.Types.ObjectId.isValid(resolvedPhaseId) && parentTask) {
       finalPhaseId = resolvedPhaseId;
     }
 
     entryData.phaseId = finalPhaseId || undefined;
     entryData.referenceId = undefined; // Managed below based on historical records
+    if (!finalPhaseId && req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
+      entryData.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+    }
 
     // Upsert / Record Search:
     let entry = null;
@@ -207,15 +249,20 @@ exports.createDailyUpdate = async (req, res) => {
       }
     } else {
       // Standalone updates: match by userId, category, project, title on same date with no phaseId/referenceId
-      entry = await DailyWorkUpdate.findOne({
+      const standaloneQuery = {
         userId: userId,
-        category: (category || "").trim(),
-        project: (project || "").trim(),
-        title: finalTitle,
         updateDate: { $gte: startOfDay, $lte: endOfDay },
         $or: [{ phaseId: { $exists: false } }, { phaseId: null }],
         $or: [{ referenceId: { $exists: false } }, { referenceId: null }]
-      });
+      };
+      if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
+        standaloneQuery.workUpdateRefId = req.body.workUpdateRefId;
+      } else {
+        standaloneQuery.category = (category || "").trim();
+        standaloneQuery.project = (project || "").trim();
+        standaloneQuery.title = finalTitle;
+      }
+      entry = await DailyWorkUpdate.findOne(standaloneQuery);
 
       if (entry && (entry.status || "").toLowerCase() === "completed") {
         entry = null;
@@ -232,6 +279,11 @@ exports.createDailyUpdate = async (req, res) => {
         if (entry._doc) {
           delete entry._doc.phaseId;
           delete entry._doc.referenceId;
+        }
+        if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
+          entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+        } else if (!entry.workUpdateRefId) {
+          entry.workUpdateRefId = entry._id;
         }
       }
       entry.description = (description || "").trim();
@@ -271,18 +323,50 @@ exports.createDailyUpdate = async (req, res) => {
       console.log(`[CreateDailyUpdate] Creating new DailyWorkUpdate entry.`);
       entry = new DailyWorkUpdate(entryData);
       await entry.save();
+      if (!finalPhaseId && !entry.workUpdateRefId) {
+        entry.workUpdateRefId = entry._id;
+        await entry.save();
+      }
     }
 
     // --- SYNC WITH PARENT TASK MODEL ---
-    if (parentTask) {
+    if (!isExplicitStandalone && parentTask) {
 
       if (targetPhase) {
-        // Sync Daily Work Update fields back to the Task Phase
-        targetPhase.phaseTitle = finalTitle;
-        targetPhase.phaseDescription = (description || "").trim();
-        targetPhase.phaseStatus = status || phaseStatus || "inprocess";
-        targetPhase.updateDate = new Date(resolvedUpdateDate);
-        targetPhase.userId = userId;
+        const isDifferentDay = targetPhase.updateDate &&
+          new Date(targetPhase.updateDate).toDateString() !== new Date(resolvedUpdateDate).toDateString();
+
+        if (isDifferentDay && entry && (!sameDayRecord || sameDayRecord._id.toString() !== entry._id.toString())) {
+          // Different calendar day: preserve previous targetPhase and add a new phase for today!
+          const newPhase = {
+            _id: entry._id || new mongoose.Types.ObjectId(),
+            phaseTitle: finalTitle || targetPhase.phaseTitle,
+            phaseDescription: (description || "").trim() || targetPhase.phaseDescription,
+            phaseStatus: status || phaseStatus || "inprocess",
+            updateDate: new Date(resolvedUpdateDate),
+            employeeId: userId || targetPhase.employeeId,
+            workingDays: 1
+          };
+          if (!parentTask.phases) parentTask.phases = [];
+          parentTask.phases.push(newPhase);
+          const addedPhase = parentTask.phases[parentTask.phases.length - 1];
+
+          entry.taskPhaseId = addedPhase._id;
+          entry.phaseId = addedPhase._id;
+          entry.task = undefined;
+          await entry.save();
+        } else {
+          // Same calendar day: update targetPhase in place
+          targetPhase.phaseTitle = finalTitle || targetPhase.phaseTitle;
+          targetPhase.phaseDescription = (description || "").trim() || targetPhase.phaseDescription;
+          targetPhase.phaseStatus = status || phaseStatus || "inprocess";
+          targetPhase.updateDate = new Date(resolvedUpdateDate);
+          if (userId) targetPhase.employeeId = userId;
+          if (!entry.phaseId) {
+            entry.phaseId = targetPhase._id;
+            await entry.save();
+          }
+        }
       } else if (finalTitle) {
         // Fallback 3: If still no targetPhase, create a new phase on the task!
         const newPhase = {
@@ -290,6 +374,7 @@ exports.createDailyUpdate = async (req, res) => {
           phaseDescription: (description || "").trim(),
           phaseStatus: status || phaseStatus || "inprocess",
           updateDate: new Date(resolvedUpdateDate),
+          employeeId: userId
         };
         if (!parentTask.phases) {
           parentTask.phases = [];
@@ -300,26 +385,18 @@ exports.createDailyUpdate = async (req, res) => {
         // Save the generated phase's ID back to the daily update
         entry.taskPhaseId = addedPhase._id;
         entry.referenceId = addedPhase._id;
+        entry.phaseId = addedPhase._id;
         entry.task = undefined; // Never store the parent taskId inside the DailyWorkUpdate entry!
         await entry.save();
       }
 
       await parentTask.save();
-    }
-
-    // ── Upsert TaskMeta (category-wise project mapping) ──
-    if (category && category.trim()) {
-      const catTrim = category.trim();
-      const projTrim = project && project.trim() ? project.trim() : null;
-      const updateOp = projTrim
-        ? { $addToSet: { projects: projTrim } }
-        : { $setOnInsert: { projects: [] } };
-
-      await TaskMeta.findOneAndUpdate(
-        { category: catTrim },
-        updateOp,
-        { upsert: true, new: true }
-      );
+      await syncTaskWorkingDays(parentTask._id);
+    } else if (finalPhaseId) {
+      const taskWithPhase = await Task.findOne({ "phases._id": finalPhaseId });
+      if (taskWithPhase) {
+        await syncTaskWorkingDays(taskWithPhase._id);
+      }
     }
 
     res.status(201).json({
@@ -399,6 +476,10 @@ exports.updateDailyUpdate = async (req, res) => {
       }
     }
 
+    if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
+      entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+    }
+
     entry.task = undefined;
     entry.updateDate = req.body.updateDate ? new Date(req.body.updateDate) : (entry.updateDate || new Date());
     await entry.save();
@@ -409,32 +490,40 @@ exports.updateDailyUpdate = async (req, res) => {
     if (activePhaseId) {
       parentTask = await Task.findOne({ "phases._id": activePhaseId });
     }
+    if (!parentTask && entry.category && entry.project) {
+      const catRegex = new RegExp(`^${entry.category.trim()}$`, "i");
+      const projRegex = new RegExp(`^${entry.project.trim()}$`, "i");
+      parentTask = await Task.findOne({
+        category: { $regex: catRegex },
+        project: { $regex: projRegex }
+      }).sort({ createdAt: -1 });
+    }
     if (parentTask) {
       parentTask.detailUpdatedAt = new Date();
-      if (activePhaseId) {
-        const phaseObj = parentTask.phases.id(activePhaseId);
-        if (phaseObj) {
-          phaseObj.phaseTitle = entry.title;
-          phaseObj.phaseDescription = entry.description;
-          phaseObj.phaseStatus = entry.status;
-          phaseObj.updateDate = new Date();
+      let phaseObj = null;
+      if (activePhaseId && parentTask.phases) {
+        phaseObj = parentTask.phases.id(activePhaseId);
+      }
+      if (!phaseObj && entry.title && parentTask.phases) {
+        phaseObj = parentTask.phases.find(
+          p => p.phaseTitle?.trim().toLowerCase() === entry.title.trim().toLowerCase()
+        );
+      }
+      if (!phaseObj && parentTask.phases?.length === 1) {
+        phaseObj = parentTask.phases[0];
+      }
+      if (phaseObj) {
+        phaseObj.phaseTitle = entry.title || phaseObj.phaseTitle;
+        phaseObj.phaseDescription = entry.description || phaseObj.phaseDescription;
+        phaseObj.phaseStatus = entry.status;
+        phaseObj.updateDate = new Date();
+        if (!entry.phaseId) {
+          entry.phaseId = phaseObj._id;
+          await entry.save();
         }
       }
       await parentTask.save();
-    }
-    // ── Upsert TaskMeta (category-wise project mapping) ──
-    if (entry.category && entry.category.trim()) {
-      const catTrim = entry.category.trim();
-      const projTrim = entry.project && entry.project.trim() ? entry.project.trim() : null;
-      const updateOp = projTrim
-        ? { $addToSet: { projects: projTrim } }
-        : { $setOnInsert: { projects: [] } };
-
-      await TaskMeta.findOneAndUpdate(
-        { category: catTrim },
-        updateOp,
-        { upsert: true, new: true }
-      ).catch(() => { });
+      await syncTaskWorkingDays(parentTask._id);
     }
 
     res.json({ success: true, message: "Update modified successfully", data: entry });
@@ -670,7 +759,9 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
                   ]
                 }
               }
-            }
+            },
+            { $sort: { createdAt: -1 } },
+            { $limit: 1 }
           ],
           as: "taskInfo"
         }
@@ -721,7 +812,8 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
                       cond: {
                         $or: [
                           { $eq: ["$$p._id", "$phaseId"] },
-                          { $eq: ["$$p._id", "$referenceId"] }
+                          { $eq: ["$$p._id", "$referenceId"] },
+                          { $eq: [{ $toLower: "$$p.phaseTitle" }, { $toLower: "$title" }] }
                         ]
                       }
                     }
@@ -731,6 +823,38 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
               }
             },
             in: { $ifNull: ["$$matchedPhase.phaseStatus", null] }
+          }
+        },
+        phaseWorkingDays: {
+          $let: {
+            vars: {
+              matchedPhase: {
+                $arrayElemAt: [
+                  {
+                    $filter: {
+                      input: { $ifNull: ["$taskInfo.phases", []] },
+                      as: "p",
+                      cond: {
+                        $or: [
+                          { $eq: ["$$p._id", "$phaseId"] },
+                          { $eq: ["$$p._id", "$referenceId"] },
+                          { $eq: [{ $toLower: "$$p.phaseTitle" }, { $toLower: "$title" }] }
+                        ]
+                      }
+                    }
+                  },
+                  0
+                ]
+              }
+            },
+            in: { $ifNull: ["$$matchedPhase.workingDays", null] }
+          }
+        },
+        overallTaskWorkingDays: {
+          $reduce: {
+            input: { $ifNull: ["$taskInfo.phases", []] },
+            initialValue: 0,
+            in: { $add: ["$$value", { $ifNull: ["$$this.workingDays", 0] }] }
           }
         },
         userId: { _id: "$userInfo._id", name: "$userInfo.name", employeeId: "$userInfo.empId", photo: "$userInfo.photo" },
@@ -745,12 +869,41 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
           category: { $ifNull: ["$taskInfo.category", "$category"] },
           project: { $ifNull: ["$taskInfo.project", "$project"] },
           workType: { $ifNull: ["$taskInfo.workType", ""] },
-          pages: { $ifNull: ["$taskInfo.pages", []] }
+          pages: { $ifNull: ["$taskInfo.pages", []] },
+          phases: { $ifNull: ["$taskInfo.phases", []] },
+          startDate: "$taskInfo.startDate",
+          endDate: "$taskInfo.endDate",
+          dueDate: "$taskInfo.dueDate",
+          status: "$taskInfo.status",
+          createdDate: "$taskInfo.createdDate",
+          createdAt: "$taskInfo.createdAt"
         }
       }
     });
 
     const combined = await DailyWorkUpdate.aggregate(dailyPipeline);
+
+    combined.forEach(item => {
+      const isTaskPhase = Boolean(item.task && item.task._id && item.task._id !== "standalone" && (item.phaseId || item.referenceId));
+      if (isTaskPhase && item.task && Array.isArray(item.task.phases) && item.task.phases.length > 0) {
+        const matched = item.task.phases.find(p =>
+          (p._id && (p._id.toString() === item.phaseId?.toString() || p._id.toString() === item.referenceId?.toString())) ||
+          (p.phaseTitle && p.phaseTitle.trim().toLowerCase() === (item.phase || item.title || "").trim().toLowerCase())
+        );
+        if (matched && matched.workingDays !== undefined) {
+          item.phaseWorkingDays = matched.workingDays;
+        } else if (item.task.phases.length === 1 && item.task.phases[0].workingDays !== undefined) {
+          item.phaseWorkingDays = item.task.phases[0].workingDays;
+        }
+      } else {
+        item.phaseWorkingDays = null;
+      }
+      if (isTaskPhase && item.task && item.task._id && item.task._id !== "standalone") {
+        item.overallTaskWorkingDays = calculateOverallTaskWorkingDays(item.task);
+      } else {
+        item.overallTaskWorkingDays = 1;
+      }
+    });
 
     // SORT BY DATE
     combined.sort((a, b) => {
@@ -936,7 +1089,7 @@ exports.getStandaloneWorkUpdates = async (req, res) => {
     }
 
     const updates = await DailyWorkUpdate.find(queryFilter)
-      .populate("task", "taskTitle taskDetails category project workType pages")
+      .populate("task", "taskTitle taskDetails category project workType pages workingDays phases status")
       .populate("userId", "name email empId photo")
       .lean();
 
@@ -953,6 +1106,16 @@ exports.getStandaloneWorkUpdates = async (req, res) => {
             console.error("Error resolving S3 signed URL for photo:", err);
           }
         }
+
+        const targetPhaseId = d.phaseId || d.referenceId;
+        const matchingPhase = Array.isArray(d.task?.phases) && targetPhaseId
+          ? d.task.phases.find(p => String(p._id) === String(targetPhaseId))
+          : null;
+
+        const phaseWorkingDays = (matchingPhase && matchingPhase.workingDays !== undefined)
+          ? matchingPhase.workingDays
+          : null;
+
         return {
           _id: d._id,
           task_id: d.task?._id || (d.task ? d.task : null),
@@ -967,6 +1130,8 @@ exports.getStandaloneWorkUpdates = async (req, res) => {
           pages: (d.pages && d.pages.length > 0) ? d.pages : (d.task?.pages || []),
           phase: d.title,
           phaseStatus: d.status,
+          workingDays: phaseWorkingDays !== null ? phaseWorkingDays : (d.task?.workingDays || null),
+          taskWorkingDays: d.task?.workingDays || null,
           note: d.description || "",
           description: d.description || "",
           employeeDetails: d.userId ? { ...d.userId, photo } : null,
@@ -979,10 +1144,48 @@ exports.getStandaloneWorkUpdates = async (req, res) => {
 
     formattedData.sort((a, b) => new Date(b.completionDate) - new Date(a.completionDate));
 
+    // Fetch company holidays
+    let holidaysList = [];
+    try {
+      const Holiday = require("../Models/Holiday.model");
+      const hols = await Holiday.find({}).lean();
+      holidaysList = hols
+        .map((h) => {
+          if (!h.date) return null;
+          const d = new Date(h.date);
+          return !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : null;
+        })
+        .filter(Boolean);
+    } catch (hErr) {
+      console.error("Error fetching holidays in getStandaloneWorkUpdates:", hErr);
+    }
+
+    // Fetch employee leave / absent dates
+    const leavesByEmp = {};
+    try {
+      const Attendance = require("../Models/Attendance.model");
+      const userIds = updates.map((u) => u.userId?._id).filter(Boolean);
+      if (userIds.length > 0) {
+        const atts = await Attendance.find({
+          employeeId: { $in: userIds },
+          status: { $in: ["Absent", "Leave", "On Leave"] },
+        }).lean();
+        atts.forEach((a) => {
+          const eid = String(a.employeeId);
+          if (!leavesByEmp[eid]) leavesByEmp[eid] = [];
+          if (a.date) leavesByEmp[eid].push(a.date);
+        });
+      }
+    } catch (aErr) {
+      console.error("Error fetching attendance in getStandaloneWorkUpdates:", aErr);
+    }
+
     res.json({
       success: true,
       count: formattedData.length,
-      data: formattedData
+      data: formattedData,
+      holidays: holidaysList,
+      leavesByEmp: leavesByEmp,
     });
 
   } catch (error) {
@@ -1139,7 +1342,15 @@ exports.deleteWorkUpdate = async (req, res) => {
       return res.status(404).json({ success: false, message: "Work update not found or unauthorized" });
     }
 
+    const linkedPhaseId = entry.phaseId || entry.referenceId;
     await DailyWorkUpdate.findByIdAndDelete(id);
+
+    if (linkedPhaseId) {
+      const parentTask = await Task.findOne({ "phases._id": linkedPhaseId });
+      if (parentTask) {
+        await syncTaskWorkingDays(parentTask._id);
+      }
+    }
 
     res.json({ success: true, message: "Work update deleted successfully" });
   } catch (error) {

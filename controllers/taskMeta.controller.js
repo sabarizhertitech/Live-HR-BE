@@ -117,9 +117,30 @@ exports.addProject = async (req, res) => {
     // Find category by ID or Name
     let mapping = null;
     if (categoryId) mapping = await TaskMeta.findById(categoryId);
-    if (!mapping && categoryName) mapping = await TaskMeta.findOne({ category: categoryName });
+    if (!mapping && categoryName) {
+      mapping = await TaskMeta.findOne({
+        category: { $regex: new RegExp(`^${categoryName.trim()}$`, "i") }
+      });
+    }
 
-    if (!mapping) return res.status(404).json({ message: "Category not found" });
+    if (!mapping) {
+      if (categoryName && categoryName.trim()) {
+        mapping = await TaskMeta.create({
+          category: categoryName.trim(),
+          projects: [trimmed]
+        });
+        return res.status(201).json({
+          success: true,
+          message: `Project "${trimmed}" added to "${mapping.category}"`,
+          data: {
+            _id: `${mapping.category}_${trimmed}`,
+            name: trimmed,
+            categoryId: mapping._id
+          },
+        });
+      }
+      return res.status(404).json({ message: "Category not found" });
+    }
 
     // Check if project already exists in this category
     const alreadyExists = mapping.projects.some(p => p.toLowerCase() === trimmed.toLowerCase());

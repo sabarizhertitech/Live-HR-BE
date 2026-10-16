@@ -145,28 +145,36 @@ function checkProfileRestriction({
   dateJoined = null,
   createdAt = null,
   empId = null,
+  profileApprovalStatus = null,
+  reviewedAt = null,
+  profileRejectedAt = null,
 }) {
   // 1. Applies only to employees
   if (role !== "employee") {
     return {
       isRestricted: false,
       daysRemaining: 7,
+      isLastDay: false,
       isNewEmployee: false,
       isComplete: true,
+      isRejected: false,
       deadline: null,
       completion: Number(profileCompletion || 0),
     };
   }
 
+  const isRejected = profileApprovalStatus === "rejected";
   const completion = Math.min(Math.max(Number(profileCompletion || 0), 0), 100);
 
-  // 3. Profile Must Be 100% Complete - No admin approval required to lift restriction
-  if (completion >= 100 || isProfileCompleted === true) {
+  // 3. Profile Must Be 100% Complete and NOT currently rejected
+  if (!isRejected && (completion >= 100 || isProfileCompleted === true)) {
     return {
       isRestricted: false,
       daysRemaining: 0,
+      isLastDay: false,
       isNewEmployee: false,
       isComplete: true,
+      isRejected: false,
       deadline: null,
       completion: 100,
     };
@@ -181,8 +189,12 @@ function checkProfileRestriction({
   let isNewEmployee = false;
   let periodStartDate;
 
-  // New Employee: Date of Joining is on or after logic introduction date (08 Oct 2026)
-  if (joiningDate && joiningDate.getTime() >= logicStartDate.getTime()) {
+  if (isRejected) {
+    // Rejected by Admin: calculate 7-day period starting from rejection date
+    const rejectionDate = reviewedAt || profileRejectedAt || createdAt;
+    periodStartDate = parseDateOnly(rejectionDate) || parseDateOnly(new Date());
+  } else if (joiningDate && joiningDate.getTime() >= logicStartDate.getTime()) {
+    // New Employee: Date of Joining is on or after logic introduction date (08 Oct 2026)
     isNewEmployee = true;
     periodStartDate = new Date(joiningDate);
   } else {
@@ -198,18 +210,30 @@ function checkProfileRestriction({
   deadline.setHours(0, 0, 0, 0);
 
   const now = new Date();
+  const today = parseDateOnly(now);
+  const startDay = parseDateOnly(periodStartDate);
 
-  // Calculate days remaining (1 to 7 during the period, 0 once expired)
-  const msRemaining = deadline.getTime() - now.getTime();
-  const daysRemaining = Math.max(0, Math.ceil(msRemaining / (1000 * 60 * 60 * 24)));
+  // Calendar days elapsed from periodStartDate:
+  // Day 1 (startDay): daysElapsed = 0
+  // Day 2: daysElapsed = 1
+  // ...
+  // Day 7: daysElapsed = 6
+  // Day 8+: daysElapsed >= 7
+  const daysElapsed = Math.max(0, Math.floor((today.getTime() - startDay.getTime()) / (1000 * 60 * 60 * 24)));
+  const daysRemaining = Math.max(0, 7 - daysElapsed);
 
-  // Starting from Day 8, if profile < 100%, access is restricted
-  const isRestricted = now.getTime() >= deadline.getTime();
+  // Day 7 is the 7th and final day of the 7-day window (daysElapsed === 6, daysRemaining === 1)
+  const isLastDay = daysRemaining === 1 && daysElapsed === 6;
+
+  // Starting from Day 8, if profile < 100% or rejected, access is restricted
+  const isRestricted = daysElapsed >= 7;
 
   return {
     isRestricted,
     daysRemaining,
+    isLastDay,
     isNewEmployee,
+    isRejected,
     isComplete: false,
     deadline,
     completion,

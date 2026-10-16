@@ -18,6 +18,7 @@ const {
   getUserSentWishes,
   getDocumentViewUrl,
   adminReviewProfile,
+  saveCertifications,
 } = require("../controllers/employee.controller");
 
 const attendanceController = require("../controllers/attendance.controller");
@@ -61,6 +62,14 @@ Users.put(
   portalAuth.authMiddleware,
   upload.any(),
   updateEmployeeDetails
+);
+
+// ✅ Auto-save certifications without consuming edit requests
+Users.put(
+  "/certifications/auto-save",
+  portalAuth.authMiddleware,
+  upload.any(),
+  saveCertifications
 );
 
 Users.get(
