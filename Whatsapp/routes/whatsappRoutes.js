@@ -14,7 +14,7 @@ router.get(["/webhook", "/call", "/"], WhatsAppController.verifyWebhook);
 router.post(["/webhook", "/call", "/"], validateWebhook, WhatsAppController.receiveMessage);
 
 // Protected Admin Endpoints (requires x-api-key header)
-router.use(auth);
+router.use(["/templates", "/customers", "/logs"], auth);
 
 // Bulk Template Message Dispatch
 router.post("/templates/send", WhatsAppTemplateController.sendBulkTemplate);

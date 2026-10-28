@@ -5,7 +5,7 @@ const info = (message, ...args) => {
 };
 
 const warn = (message, ...args) => {
-    console.warn(`⚠️ [WARN] ${new Date().toISOString()}: ${message}`, ...args);
+    console.warn(`[WARN] ${new Date().toISOString()}: ${message}`, ...args);
 };
 
 const error = (message, ...args) => {

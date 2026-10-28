@@ -117,7 +117,7 @@ const ThirukkuralController = {
 
       // If none exists → create one safely
       if (!kural) {
-        console.log('⚠️ No active kural. Rotating...');
+        console.log('No active kural. Rotating...');
         kural = await rotateKural();
 
         // Fetch again to ensure consistency

@@ -1,7 +1,7 @@
 // backend/routes/leaveRoutes.js
 const express = require("express");
 const router = express.Router();
-const { authMiddleware } = require("../middleware/portalAuth");
+const { authMiddleware, adminMiddleware } = require("../middleware/portalAuth");
 const {
   createRequest,
   getMyLeaves,
@@ -15,12 +15,18 @@ const {
   getAllWFHRequests,
   createPermissionRequest,
   dismissLeaveNotification,
+  getPermissionConfigController,
+  updatePermissionConfigController,
 } = require("../controllers/leaveController");
 const sanitizeRequestData = require("../middleware/sanitizeRequestData");
 
 // ✅ Apply middleware to all routes
 router.use(sanitizeRequestData);
 router.use(authMiddleware);
+
+// Configuration for permissions
+router.get("/permission-config", getPermissionConfigController);
+router.put("/permission-config", adminMiddleware, updatePermissionConfigController);
 
 // GET /api/leaves/admin/all - Get all LEAVE requests (Admin only)
 router.get("/admin/all", getAllRequestsAdmin);
@@ -59,4 +65,4 @@ router.put(
   updatePermissionStatus
 );
 
-module.exports = router;
+module.exports = router;

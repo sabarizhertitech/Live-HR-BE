@@ -39,12 +39,12 @@ class ConnectedBankingService {
                 text === "2"
             ) {
                 if (!phone) {
-                    return "⚠️ Unable to verify account owner. Please try again.";
+                    return "Unable to verify account owner. Please try again.";
                 }
 
                 const customer = await Customer.findOne({ mobileNumber: phone });
                 if (!customer) {
-                    return "⚠️ Customer profile not found. Please complete registration.";
+                    return "Customer profile not found. Please complete registration.";
                 }
 
                 return (

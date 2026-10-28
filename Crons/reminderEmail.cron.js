@@ -18,10 +18,10 @@ cron.schedule("* * * * *", async () => {
       const emails = new Set();
       if (reminder.email) emails.add(reminder.email);
       if (Array.isArray(reminder.participants)) {
-           reminder.participants.forEach((p) => {
+        reminder.participants.forEach((p) => {
           if (p.email) emails.add(p.email);
-            });
-        }
+        });
+      }
 
 
       if (emails.size === 0) continue;
@@ -81,7 +81,7 @@ cron.schedule("* * * * *", async () => {
       </div>
 
       <div style="margin-top:25px; padding:15px; background:#fef3c7; border-radius:8px;">
-          <b>⚠️ Please Note:</b> This is an automated reminder. Make sure you’re prepared.
+          <b>Please Note:</b> This is an automated reminder. Make sure you’re prepared.
         </div>
     </div>
   </div>

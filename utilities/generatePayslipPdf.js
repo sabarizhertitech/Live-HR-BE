@@ -92,7 +92,7 @@ const getBrowser = async () => {
         b = await puppeteer.launch(launchOptions);
       } catch (launchErr) {
         if (launchOptions.executablePath) {
-          console.warn("⚠️ Failed to launch browser with specified executablePath, retrying with default puppeteer browser...", launchErr.message);
+          console.warn("Failed to launch browser with specified executablePath, retrying with default puppeteer browser...", launchErr.message);
           const fallbackOptions = { ...launchOptions };
           delete fallbackOptions.executablePath;
           b = await puppeteer.launch(fallbackOptions);
@@ -123,7 +123,7 @@ let queuePromise = Promise.resolve();
 
 const queueTask = (task) => {
   const next = queuePromise.then(() => task(), () => task());
-  queuePromise = next.catch(() => {});
+  queuePromise = next.catch(() => { });
   return next;
 };
 
@@ -160,7 +160,7 @@ const generatePayslipPdf = async (html) => {
     try {
       return await attemptGenerate();
     } catch (err) {
-      console.warn("⚠️ PDF Generation failed on first try, resetting browser and retrying...", err.message);
+      console.warn("PDF Generation failed on first try, resetting browser and retrying...", err.message);
       await closeBrowser();
       return await attemptGenerate();
     }

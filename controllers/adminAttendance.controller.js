@@ -1633,12 +1633,6 @@ const adminAttendanceController = {
         const title = "Permission Approved";
         const body = `Your permission request from ${new Date(request.from).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} to ${new Date(request.to).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} has been approved.`;
 
-        await sendPushNotification(request.employeeId, title, body, {
-          requestId: request._id.toString(),
-          type: "permission",
-          status: "Approved",
-        });
-
         await new Notification({
           type: "PERMISSION_APPROVED",
           toEmployee: request.employeeId,
@@ -1647,10 +1641,21 @@ const adminAttendanceController = {
           metadata: {
             ticketId: request._id.toString(),
             requestType: "permission",
+            url: "/emp/request-leave",
           },
         }).save();
-      } catch (pushErr) {
-        console.error("[AdminAttendance] Error sending status update push:", pushErr);
+
+        try {
+          await sendPushNotification(request.employeeId, title, body, {
+            requestId: request._id.toString(),
+            type: "permission",
+            status: "Approved",
+          });
+        } catch (pushErr) {
+          console.error("[AdminAttendance] Error sending status update push:", pushErr);
+        }
+      } catch (notifErr) {
+        console.error("[AdminAttendance] Error saving approve notification:", notifErr);
       }
 
       res.json({ success: true });
@@ -1703,12 +1708,6 @@ const adminAttendanceController = {
         const title = "Permission Rejected";
         const body = `Your permission request from ${new Date(request.from).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} to ${new Date(request.to).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} has been rejected.`;
 
-        await sendPushNotification(request.employeeId, title, body, {
-          requestId: request._id.toString(),
-          type: "permission",
-          status: "Rejected",
-        });
-
         await new Notification({
           type: "PERMISSION_REJECTED",
           toEmployee: request.employeeId,
@@ -1717,10 +1716,21 @@ const adminAttendanceController = {
           metadata: {
             ticketId: request._id.toString(),
             requestType: "permission",
+            url: "/emp/request-leave",
           },
         }).save();
-      } catch (pushErr) {
-        console.error("[AdminAttendance] Error sending status update push:", pushErr);
+
+        try {
+          await sendPushNotification(request.employeeId, title, body, {
+            requestId: request._id.toString(),
+            type: "permission",
+            status: "Rejected",
+          });
+        } catch (pushErr) {
+          console.error("[AdminAttendance] Error sending status update push:", pushErr);
+        }
+      } catch (notifErr) {
+        console.error("[AdminAttendance] Error saving reject notification:", notifErr);
       }
 
       res.json({ success: true });

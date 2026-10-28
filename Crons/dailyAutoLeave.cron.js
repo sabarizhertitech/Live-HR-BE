@@ -51,7 +51,7 @@ const job = cron.schedule(
         .lean();
 
       if (!employees.length) {
-        console.log("⚠️ No employees found");
+        console.log("No employees found");
         return;
       }
 

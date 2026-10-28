@@ -12,7 +12,6 @@ const path = require('path');
 const fs = require('fs');
 
 
-// ? CREATE APP FIRST
 const app = express();
 const server = http.createServer(app);
 
@@ -48,7 +47,7 @@ const whatsAppTrainingRoutes = require('./Whatsapp/routes/trainingRoutes');
 const instagramCareRoutes = require('./Routes/care/instagramCareRoutes');
 const facebookCareRoutes = require('./Routes/care/facebookCareRoutes');
 const careRoutes = require('./Routes/care/careRoutes');
-
+const Mandate = require('./Routes/Mandate')
 
 
 
@@ -101,17 +100,16 @@ app.use(express.urlencoded({
 
 app.use(xss());
 
-// ? Social Media - Instagram & Facebook Unified Routes
+
 app.use('/instagram', instagramCareRoutes);
 app.use('/api/instagram', instagramCareRoutes);
 app.use('/facebook', facebookCareRoutes);
 app.use('/api/facebook', facebookCareRoutes);
 
-// ? Meta App Review - Facebook Page Connection Flow
+
 app.use('/api/facebook-review', facebookCareRoutes);
 app.use('/facebook-review', facebookCareRoutes);
 
-// ? Social Media Care Module
 app.use('/api/care', careRoutes);
 
 
@@ -147,7 +145,7 @@ app.use('/api/whatsapp', whatsAppRoutes);
 app.use('/', whatsAppRoutes);
 app.use('/api/support/tickets', whatsAppTicketRoutes);
 app.use('/api/support', whatsAppSupportRoutes);
-app.use('/api/training', whatsAppTrainingRoutes);
+app.use('/cub', Mandate);
 
 
 

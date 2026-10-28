@@ -17,17 +17,17 @@ class TransactionService {
             // =====================================
             const txnIdMatch = text.match(/\b(txn[a-z0-9]+)\b/i);
             const refIdMatch = text.match(/\b(ref-[a-z]+-\d+)\b/i);
-            
+
             const searchKey = txnIdMatch ? txnIdMatch[1].toUpperCase() : (refIdMatch ? refIdMatch[1].toUpperCase() : null);
 
             if (searchKey) {
                 if (!phone) {
-                    return "⚠️ Unable to verify transaction owner. Please try again.";
+                    return "Unable to verify transaction owner. Please try again.";
                 }
 
                 const customer = await Customer.findOne({ mobileNumber: phone });
                 if (!customer) {
-                    return "⚠️ Customer profile not found. Please complete registration.";
+                    return "Customer profile not found. Please complete registration.";
                 }
 
                 const txn = await Transaction.findOne({
@@ -38,12 +38,12 @@ class TransactionService {
                 });
 
                 if (!txn) {
-                    return `⚠️ Transaction *${searchKey}* not found in our database. Please double-check the ID.`;
+                    return `Transaction *${searchKey}* not found in our database. Please double-check the ID.`;
                 }
 
                 // Security Check: Verify that the transaction belongs to the requesting customer
                 if (txn.customerId !== customer.customerId) {
-                    return "⚠️ Security Alert: You do not have permission to view this transaction.";
+                    return "Security Alert: You do not have permission to view this transaction.";
                 }
 
                 return (

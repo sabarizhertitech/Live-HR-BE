@@ -55,7 +55,7 @@ cron.schedule("0 20 * * *", async () => {
 });
 
 // ============================================================================
-// ⚠️ DAILY ATTENDANCE REPORT EMAIL CRON (COMMENTED OUT TEMPORARILY)
+// DAILY ATTENDANCE REPORT EMAIL CRON (COMMENTED OUT TEMPORARILY)
 // ============================================================================
 /*
 let dailyReportCronTask = null;

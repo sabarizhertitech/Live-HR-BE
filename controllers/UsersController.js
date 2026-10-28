@@ -236,6 +236,15 @@ const UsersController = {
         profileDeadline = restriction.deadline;
       }
 
+      let hrAccessConfig = null;
+      if (user.isHr) {
+        try {
+          const Configuration = require("../Models/Configuration");
+          const configDoc = await Configuration.findOne({ key: "DEFAULT_CONFIG" }).lean();
+          hrAccessConfig = configDoc?.hrAccessConfig || null;
+        } catch (_) {}
+      }
+
       if (user.isFirstLogin) {
         return res.status(200).json({
           message: "Login success",
@@ -247,6 +256,7 @@ const UsersController = {
           isHr: !!user.isHr,
           token,
           permissions,
+          hrAccessConfig,
           forceChangePassword: true,
           passwordExpiringSoon: false,
           passwordExpiresAt: user.passwordExpiresAt,
@@ -275,6 +285,7 @@ const UsersController = {
         isHr: !!user.isHr,
         token,
         permissions,
+        hrAccessConfig,
         forceChangePassword,
         passwordExpiringSoon,
         passwordExpiresAt: user.passwordExpiresAt,
@@ -815,7 +826,7 @@ const UsersController = {
                         <table width="100%" cellpadding="0" cellspacing="0" style="background:#fff3cd;border-radius:6px;border-left:4px solid #ffc107;margin:25px 0;">
                           <tr><td style="padding:15px 20px;">
                             <p style="color:#856404;font-size:14px;margin:0;line-height:1.5;">
-                              <strong>⚠️ Important:</strong> For security reasons, please change your password immediately after your first login.
+                              <strong>Important:</strong> For security reasons, please change your password immediately after your first login.
                             </p>
                           </td></tr>
                         </table>
@@ -1192,7 +1203,7 @@ const UsersController = {
           if (existingDoc?.incrementLetter?.fileKey && existingDoc.incrementLetter.fileKey !== incKey) {
             await redisClient.del(`s3url:${existingDoc.incrementLetter.fileKey}`);
           }
-        } catch {}
+        } catch { }
 
         incrementLetterData = {
           fileKey: incKey,
@@ -1218,7 +1229,7 @@ const UsersController = {
           if (existingDoc?.performanceForm?.fileKey && existingDoc.performanceForm.fileKey !== perfKey) {
             await redisClient.del(`s3url:${existingDoc.performanceForm.fileKey}`);
           }
-        } catch {}
+        } catch { }
 
         performanceFormData = {
           fileKey: perfKey,
@@ -1440,7 +1451,7 @@ const UsersController = {
             if (existingDoc?.incrementLetter?.fileKey && existingDoc.incrementLetter.fileKey !== incKey) {
               await redisClient.del(`s3url:${existingDoc.incrementLetter.fileKey}`);
             }
-          } catch {}
+          } catch { }
 
           incrementLetterData = {
             fileKey: incKey,
@@ -1466,7 +1477,7 @@ const UsersController = {
             if (existingDoc?.performanceForm?.fileKey && existingDoc.performanceForm.fileKey !== perfKey) {
               await redisClient.del(`s3url:${existingDoc.performanceForm.fileKey}`);
             }
-          } catch {}
+          } catch { }
 
           performanceFormData = {
             fileKey: perfKey,
@@ -1671,7 +1682,7 @@ const UsersController = {
           if (existingDoc?.incrementLetter?.fileKey && existingDoc.incrementLetter.fileKey !== incKey) {
             await redisClient.del(`s3url:${existingDoc.incrementLetter.fileKey}`);
           }
-        } catch {}
+        } catch { }
 
         incrementLetterData = {
           fileKey: incKey,
@@ -1697,7 +1708,7 @@ const UsersController = {
           if (existingDoc?.performanceForm?.fileKey && existingDoc.performanceForm.fileKey !== perfKey) {
             await redisClient.del(`s3url:${existingDoc.performanceForm.fileKey}`);
           }
-        } catch {}
+        } catch { }
 
         performanceFormData = {
           fileKey: perfKey,
@@ -2276,16 +2287,24 @@ const UsersController = {
         return res.status(400).json({ success: false, message: "Employee ID is required" });
       }
 
-      // Check Admin or HR access
-      const isAuthorized =
-        req.user?.role === "admin" ||
-        req.user?.role === "superadmin" ||
-        Boolean(req.user?.isHr);
+      // Check Admin/HR access for document deletion
+      const userRole = (req.user?.role || "").toLowerCase();
+      const isHr = Boolean(req.user?.isHr === true || req.user?.isHr === "true" || userRole === "hr");
+      const isAdmin = (userRole === "admin" || userRole === "superadmin") && !isHr;
+
+      let isAuthorized = Boolean(isAdmin);
+      if (isHr) {
+        const Configuration = require("../Models/Configuration");
+        const config = await Configuration.findOne({ key: "DEFAULT_CONFIG" }).lean();
+        if (config?.hrAccessConfig?.employeeManagement?.canDeleteDocuments) {
+          isAuthorized = true;
+        }
+      }
 
       if (!isAuthorized) {
         return res.status(403).json({
           success: false,
-          message: "Access denied. Only Admin and HR can delete uploaded documents.",
+          message: "Access denied. You do not have permission to delete uploaded documents.",
         });
       }
 
@@ -2404,8 +2423,8 @@ const UsersController = {
             cert = employeeDetails.professionalCertifications.id
               ? employeeDetails.professionalCertifications.id(certId)
               : employeeDetails.professionalCertifications.find(
-                  (x) => String(x._id) === String(certId)
-                );
+                (x) => String(x._id) === String(certId)
+              );
           } else if (certIdx != null) {
             cert = employeeDetails.professionalCertifications[certIdx];
           } else if (field?.startsWith("professionalCertifications.")) {
@@ -2458,7 +2477,7 @@ const UsersController = {
             fileKey: keyToPurge,
             empIdString: employeeDetails.empIdString || emp?.empId,
           },
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       return res.status(200).json({

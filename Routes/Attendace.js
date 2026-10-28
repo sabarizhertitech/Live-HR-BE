@@ -6,6 +6,11 @@ const adminAttendanceController = require("../controllers/adminAttendance.contro
 const morningAttendanceReportController = require("../controllers/morningAttendanceReport.controller");
 const whatsappAttendanceReportController = require("../controllers/whatsappAttendanceReport.controller");
 const sanitizeRequestData = require("../middleware/sanitizeRequestData");
+const {
+  requireHrAttendanceDaily,
+  requireHrAttendanceMonthly,
+  requireHrAttendanceExport,
+} = portalAuth;
 
 const AttendanceRoutes = express.Router();
 AttendanceRoutes.use(sanitizeRequestData)
@@ -87,15 +92,15 @@ AttendanceRoutes.get("/employee/attendance-overview",readLimiter,portalAuth.empl
 ═══════════════════════════════════════════════ */
 
 // Read-only admin routes — moderate limiter
-AttendanceRoutes.get("/admin/analytics", readLimiter, portalAuth.adminMiddleware, adminAttendanceController.getMonthlyAnalytics);
+AttendanceRoutes.get("/admin/analytics", readLimiter, portalAuth.adminMiddleware, requireHrAttendanceMonthly, adminAttendanceController.getMonthlyAnalytics);
 
-AttendanceRoutes.get("/admin/daily", readLimiter, portalAuth.adminMiddleware, adminAttendanceController.getDailyAttendance);
+AttendanceRoutes.get("/admin/daily", readLimiter, portalAuth.adminMiddleware, requireHrAttendanceDaily, adminAttendanceController.getDailyAttendance);
 
 AttendanceRoutes.get("/admin/leaves", readLimiter, portalAuth.adminMiddleware, adminAttendanceController.getDailyLeaves);
 
 AttendanceRoutes.get("/admin/departments",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.getDepartments);
 
-AttendanceRoutes.get("/admin/attendance-report",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.getAttendanceReport);
+AttendanceRoutes.get("/admin/attendance-report",readLimiter,portalAuth.adminMiddleware, requireHrAttendanceMonthly, adminAttendanceController.getAttendanceReport);
 
 AttendanceRoutes.get("/admin/morning-attendance-report",readLimiter,portalAuth.adminMiddleware,morningAttendanceReportController.getMorningAttendanceReport);
 
@@ -105,12 +110,12 @@ AttendanceRoutes.get("/admin/dashboard-stats",readLimiter,portalAuth.adminMiddle
 
 AttendanceRoutes.get("/admin/employee-activity",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.getTodayEmployeeActivity);
 
-AttendanceRoutes.get("/admin/attendance-preview",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.getEmployeeAttendancePreview);
+AttendanceRoutes.get("/admin/attendance-preview",readLimiter,portalAuth.adminMiddleware, requireHrAttendanceMonthly, adminAttendanceController.getEmployeeAttendancePreview);
 
 // Download routes — moderate limiter
-AttendanceRoutes.get("/download/employee-summary",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.downloadSingleEmployeeSummary);
+AttendanceRoutes.get("/download/employee-summary",readLimiter,portalAuth.adminMiddleware, requireHrAttendanceExport, adminAttendanceController.downloadSingleEmployeeSummary);
 
-AttendanceRoutes.get("/download/all-summary",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.downloadAllEmployeesSummary);
+AttendanceRoutes.get("/download/all-summary",readLimiter,portalAuth.adminMiddleware, requireHrAttendanceExport, adminAttendanceController.downloadAllEmployeesSummary);
 
 // Permission approval routes — admin action limiter (write actions)
 AttendanceRoutes.get("/admin/permission/pending",readLimiter,portalAuth.adminMiddleware,adminAttendanceController.getPermissionRequests);

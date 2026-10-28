@@ -79,6 +79,10 @@ function sanitizeDailyWorkUpdate(doc) {
       doc.pages = validPages;
     }
   }
+  if (doc.workUpdateRefId && doc._id && doc.workUpdateRefId.toString() === doc._id.toString()) {
+    doc.set("workUpdateRefId", undefined);
+    if (doc._doc) delete doc._doc.workUpdateRefId;
+  }
 }
 
 dailyWorkUpdateSchema.pre("validate", function () {

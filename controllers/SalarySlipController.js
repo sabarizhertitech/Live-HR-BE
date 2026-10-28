@@ -19,6 +19,7 @@ const deleteFromS3 = require("../utilities/s3Delete");
 const numberToWords = require("../utilities/numberToWords");
 const { calculateMonthlyAttendance } = require("../Services/attendanceCalculator.service");
 const { createLog } = require("../utilities/logService");
+const { calculateEmployeeLop } = require("../Services/lopCalculator.service");
 
 const TZ = "Asia/Kolkata";
 
@@ -251,6 +252,7 @@ async function createSalarySlip({
   overrideAllowances,
   relievedSalaryMode = "full",
   customPayableDays,
+  deductLop,
 
   employeeMap = null,
   employeeDetailsMap = null,
@@ -574,6 +576,24 @@ async function createSalarySlip({
     autoDeductions.push({ label: "ESI", amount: esiAmount });
   }
 
+  // ==========================================
+  // LOSS OF PAY (LOP) CALCULATION LOGIC
+  // ==========================================
+  const applicableMonthlySalary = hasOverrideBasic
+    ? Number(overrideSalary) + proratedAllowances.reduce((sum, a) => sum + Number(a.amount || 0), 0)
+    : Number(salaryRow?.totalSalary || (Number(salaryRow?.basicSalary || 0) + allowances.reduce((sum, a) => sum + Number(a.amount || 0), 0)));
+
+  const lopResult = await calculateEmployeeLop({
+    employeeId,
+    month: m,
+    year: y,
+    applicableMonthlySalary,
+    employeeObj: employee,
+  });
+
+  const isLopLabel = (label) =>
+    /^(loss of pay|loss of pay \(lop\)|lop)$/i.test((label || "").trim());
+
   // Merge incoming deductions with auto EPF/ESI
   // Prevent duplicates: if frontend already sends EPF/ESI labels, skip auto-add
   const incomingLabels = new Set(
@@ -583,13 +603,44 @@ async function createSalarySlip({
     (d) => !incomingLabels.has(d.label.toLowerCase())
   );
 
-  const finalDeductions = [
-    ...(deductions || []).map((d) => ({
+  // Filter out any existing LOP deduction from incoming/auto to prevent duplicate on regenerate
+  const cleanIncomingDeductions = (deductions || [])
+    .filter((d) => !isLopLabel(d.label))
+    .map((d) => ({
       label: d.label.trim(),
       amount: Number(Number(d.amount || 0).toFixed(2)),
-    })),
-    ...filteredAutoDeductions,
+    }));
+
+  const cleanAutoDeductions = filteredAutoDeductions.filter(
+    (d) => !isLopLabel(d.label)
+  );
+
+  let finalDeductions = [
+    ...cleanIncomingDeductions,
+    ...cleanAutoDeductions,
   ];
+
+  const shouldDeductLop = deductLop !== undefined
+    ? Boolean(deductLop)
+    : (deductions && Array.isArray(deductions) ? deductions.some(d => isLopLabel(d.label)) : true);
+
+  // If employee has LOP and shouldDeductLop is true, insert immediately after "Full Deduction" if present, else append
+  if (shouldDeductLop && lopResult.hasLop && lopResult.lopAmount > 0) {
+    const lopEntry = {
+      label: "Loss of Pay (LOP)",
+      amount: lopResult.lopAmount,
+    };
+
+    const fullDeductionIndex = finalDeductions.findIndex((d) =>
+      /^full deduction$/i.test((d.label || "").trim())
+    );
+
+    if (fullDeductionIndex !== -1) {
+      finalDeductions.splice(fullDeductionIndex + 1, 0, lopEntry);
+    } else {
+      finalDeductions.push(lopEntry);
+    }
+  }
 
   const rawTotalDeductions = finalDeductions.reduce(
     (sum, row) => sum + Number(row.amount || 0),
@@ -598,7 +649,7 @@ async function createSalarySlip({
   // FIX 10: Total Deductions can never be negative
   const totalDeductions = Math.max(0, Number(rawTotalDeductions.toFixed(2)));
 
-  // FIX 10: Net Pay can never become negative
+  // FIX 10: Net Pay can never become negative (reflects take-home pay after LOP)
   const netPay = Math.max(0, Number((totalEarnings - totalDeductions).toFixed(2)));
 
   const payload = {
@@ -647,13 +698,23 @@ async function createSalarySlip({
     isLocked: true,
   };
 
+  // Only store LOP details in DB when actual LOP deduction applies (no null/empty/blank fields)
+  if (shouldDeductLop && lopResult.hasLop && lopResult.lopAmount > 0) {
+    payload.lopDays = lopResult.lopDays;
+    payload.lopAmount = lopResult.lopAmount;
+  }
+
   let slip;
 
   if (existing && regenerate) {
-    // 🔄 Regenerate: update in place (preserves _id, audit trail)
+    // 🔄 Regenerate: update in place (preserves _id, audit trail, prevents duplication)
+    const updateOps = { $set: payload };
+    if (!payload.lopDays) {
+      updateOps.$unset = { lopDays: 1, lopAmount: 1 };
+    }
     slip = await SalarySlip.findByIdAndUpdate(
       existing._id,
-      payload,
+      updateOps,
       { new: true }
     );
   } else {
@@ -785,6 +846,7 @@ exports.generateMultipleSalarySlip = async (req, res) => {
               deductions: emp.deductions || [],
               relievedSalaryMode: emp.relievedSalaryMode,
               customPayableDays: emp.customPayableDays,
+              deductLop: emp.deductLop,
 
               employeeMap,
               employeeDetailsMap,
@@ -955,15 +1017,30 @@ const formatSalarySlipWithDetails = async (s) => {
     : calculatedPresentDays;
 
   const salaryRow = getLatestApplicableSalary(details?.salaryHistory || [], s.month, s.year);
-  const earnings = [
-    { label: "Basic Salary", amount: Number(salaryRow?.basicSalary || 0) },
-    ...(salaryRow?.allowances || []).map(a => ({
-      label: a.label || "Allowance",
-      amount: Number(a.value || 0)
-    }))
-  ];
-  const totalEarnings = earnings.reduce((sum, r) => sum + r.amount, 0);
-  const netPay = Math.max(0, totalEarnings - (s.totalDeductions || 0));
+  const earnings = (s.earnings && s.earnings.length > 0)
+    ? s.earnings
+    : [
+      { label: "Basic Salary", amount: Number(salaryRow?.basicSalary || 0) },
+      ...(salaryRow?.allowances || []).map(a => ({
+        label: a.label || "Allowance",
+        amount: Number(a.value || 0)
+      }))
+    ];
+  const totalEarnings = (s.totalEarnings !== undefined && s.totalEarnings !== null)
+    ? s.totalEarnings
+    : earnings.reduce((sum, r) => sum + r.amount, 0);
+
+  const deductions = (s.deductions && s.deductions.length > 0)
+    ? s.deductions
+    : [];
+
+  const totalDeductions = (s.totalDeductions !== undefined && s.totalDeductions !== null)
+    ? s.totalDeductions
+    : deductions.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
+  const netPay = (s.netPay !== undefined && s.netPay !== null)
+    ? s.netPay
+    : Math.max(0, totalEarnings - totalDeductions);
   const amountInWords = numberToWords(netPay);
 
   return {
@@ -978,8 +1055,12 @@ const formatSalarySlipWithDetails = async (s) => {
     presentDays: finalPresentDays,
     earnings,
     totalEarnings,
+    deductions,
+    totalDeductions,
     netPay,
     amountInWords,
+    ...(s.lopDays !== undefined && s.lopDays !== null ? { lopDays: s.lopDays } : {}),
+    ...(s.lopAmount !== undefined && s.lopAmount !== null ? { lopAmount: s.lopAmount } : {}),
     bankName: details?.bankName || "-",
     branchName: details?.branch || "-",
     accountNumber: (() => {
@@ -1762,7 +1843,7 @@ exports.getEmployeesForPayroll = async (req, res) => {
         }).lean();
 
         if (!details) {
-          console.warn("⚠️ No EmployeeDetails for:", emp._id);
+          console.warn("No EmployeeDetails for:", emp._id);
         }
 
         const salaryHistory = details?.salaryHistory || [];
@@ -1797,16 +1878,19 @@ exports.getEmployeesForPayroll = async (req, res) => {
         }
 
         // Get applicable salary row
-        let salaryRow = null;
-        if (salaryHistory.length > 0) {
-          salaryRow = salaryHistory.find(s => Number(s.effectiveMonth) === month && Number(s.effectiveYear) === year);
-          if (!salaryRow) {
-            salaryRow = salaryHistory[0]; // fallback to latest
-          }
-        }
+        const salaryRow = getLatestApplicableSalary(salaryHistory, month, year);
 
         const fullBasic = Number(salaryRow?.basicSalary || 0);
         const allowances = salaryRow?.allowances || [];
+        const fullSalary = Number(salaryRow?.totalSalary || (fullBasic + allowances.reduce((s, a) => s + Number(a.amount ?? a.value ?? 0), 0)));
+
+        const lopResult = await calculateEmployeeLop({
+          employeeId: emp._id,
+          month,
+          year,
+          applicableMonthlySalary: fullSalary,
+          employeeObj: emp,
+        });
 
         const prorationRatio = Math.min(1, Math.max(0, payableDays / monthDays));
         const deductedBasicSalary = Math.round(fullBasic * prorationRatio);
@@ -1830,6 +1914,8 @@ exports.getEmployeesForPayroll = async (req, res) => {
 
           hasSalary,
           hasGeneratedSlip,
+          hasLop: lopResult.hasLop,
+          ...(lopResult.hasLop ? { lopDays: lopResult.lopDays, lopAmount: lopResult.lopAmount } : {}),
 
           deductedSalary: {
             basicSalary: deductedBasicSalary,

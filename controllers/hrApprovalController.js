@@ -48,6 +48,18 @@ exports.submitHrAction = async (req, res) => {
       });
     }
 
+    // Check HR permission for employee editing
+    if ((actionType === "EDIT_EMPLOYEE" || targetModule === "EMPLOYEE") && isHrUser && !isAdminUser) {
+      const Configuration = require("../Models/Configuration");
+      const configDoc = await Configuration.findOne({ key: "DEFAULT_CONFIG" }).lean();
+      if (configDoc?.hrAccessConfig?.employeeManagement?.canEdit === false) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. HR does not have permission to edit employee details.",
+        });
+      }
+    }
+
     // If leave category action, validate tiers immediately
     if (targetModule === "LEAVE_CATEGORY" || targetModule === "LEAVE_MANAGEMENT") {
       if (payload.tiers) {

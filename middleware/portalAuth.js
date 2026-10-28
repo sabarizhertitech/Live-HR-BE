@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const { JWT_SECRET } = require("../utilities/config");
 const Employee = require("../Models/Employee");
+const Configuration = require("../Models/Configuration");
 
 /* ===================== HELPERS ===================== */
 
@@ -136,6 +137,75 @@ const userId = decoded.id || decoded._id;
   return createUserObject(user);
 };
 
+/* ===================== HR ACCESS HELPERS & GUARDS ===================== */
+
+const getHrAccessConfig = async () => {
+  try {
+    const config = await Configuration.findOne({ key: "DEFAULT_CONFIG" }).lean();
+    return (
+      config?.hrAccessConfig || {
+        slipAndLetter: "WRITE",
+        hrRequests: "WRITE",
+        leaveManagement: "MAKER",
+        employeeManagement: {
+          canAdd: true,
+          canView: true,
+          canEdit: true,
+          canDeleteDocuments: false,
+        },
+        attendanceManagement: {
+          dailyReport: true,
+          monthlyOverview: true,
+          exportAttendance: true,
+        },
+        holidays: "MAKER",
+      }
+    );
+  } catch (err) {
+    console.error("Error reading hrAccessConfig in middleware:", err);
+    return null;
+  }
+};
+
+const checkHrPermission = (moduleName, checkFn) => {
+  return async (req, res, next) => {
+    try {
+      const userRole = (req.user?.role || "").toLowerCase();
+      const isHr = Boolean(req.user?.isHr === true || req.user?.isHr === "true" || userRole === "hr");
+      const isAdmin = (userRole === "admin" || userRole === "superadmin") && !isHr;
+
+      // Pure Admin has unrestricted access
+      if (isAdmin) {
+        return next();
+      }
+
+      if (isHr) {
+        const hrConfig = await getHrAccessConfig();
+        const allowed = hrConfig ? checkFn(hrConfig) : false;
+
+        if (!allowed) {
+          return res.status(403).json({
+            success: false,
+            message: `Access denied. Your HR permissions do not allow this ${moduleName} action.`,
+          });
+        }
+
+        req.hrAccessConfig = hrConfig;
+        return next();
+      }
+
+      // Neither Admin nor HR
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: Admin or HR privileges required.",
+      });
+    } catch (error) {
+      console.error(`HR permission check error for ${moduleName}:`, error);
+      return res.status(500).json({ success: false, message: "Internal permission validation error." });
+    }
+  };
+};
+
 /* ===================== MIDDLEWARE ===================== */
 
 const portalAuth = {
@@ -200,6 +270,76 @@ const portalAuth = {
     } catch (error) {
       return handleAuthError(error, res);
     }
+  },
+
+  // ── HR Access Helpers & Methods ──
+  getHrAccessConfig,
+  checkHrPermission,
+
+  // ── Employee Management HR Guards ──
+  requireHrEmployeeCanAdd: checkHrPermission(
+    "Employee Management",
+    (cfg) => cfg.employeeManagement?.canAdd !== false
+  ),
+  requireHrEmployeeCanView: checkHrPermission(
+    "Employee Management",
+    (cfg) => cfg.employeeManagement?.canView !== false
+  ),
+  requireHrEmployeeCanEdit: checkHrPermission(
+    "Employee Management",
+    (cfg) => cfg.employeeManagement?.canEdit !== false
+  ),
+  requireHrEmployeeCanDeleteDocs: checkHrPermission(
+    "Employee Management",
+    (cfg) => Boolean(cfg.employeeManagement?.canDeleteDocuments)
+  ),
+
+  // ── Attendance Management HR Guards ──
+  requireHrAttendanceDaily: checkHrPermission(
+    "Attendance Management",
+    (cfg) => cfg.attendanceManagement?.dailyReport !== false
+  ),
+  requireHrAttendanceMonthly: checkHrPermission(
+    "Attendance Management",
+    (cfg) => cfg.attendanceManagement?.monthlyOverview !== false
+  ),
+  requireHrAttendanceExport: checkHrPermission(
+    "Attendance Management",
+    (cfg) => cfg.attendanceManagement?.exportAttendance !== false
+  ),
+
+  // ── Slip & Letters HR Guards ──
+  requireHrSlipWrite: checkHrPermission(
+    "Slip Generation",
+    (cfg) => ["WRITE", "FULL_ACCESS"].includes(cfg.slipAndLetter)
+  ),
+  requireHrSlipDelete: checkHrPermission(
+    "Slip Generation",
+    (cfg) => cfg.slipAndLetter === "FULL_ACCESS"
+  ),
+
+  // ── HR Requests Guards ──
+  requireHrRequestsWrite: checkHrPermission(
+    "HR Requests",
+    (cfg) => ["WRITE", "FULL_ACCESS"].includes(cfg.hrRequests)
+  ),
+  requireHrRequestsDelete: checkHrPermission(
+    "HR Requests",
+    (cfg) => cfg.hrRequests === "FULL_ACCESS"
+  ),
+
+  // ── Pure Admin Only (HR strictly forbidden) ──
+  requirePureAdmin: (req, res, next) => {
+    const userRole = (req.user?.role || "").toLowerCase();
+    const isHr = Boolean(req.user?.isHr === true || req.user?.isHr === "true" || userRole === "hr");
+    const isAdmin = (userRole === "admin" || userRole === "superadmin") && !isHr;
+    if (isAdmin) {
+      return next();
+    }
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: Super Administrator privileges required for this action.",
+    });
   },
 };
 

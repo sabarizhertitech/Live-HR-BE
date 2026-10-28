@@ -63,9 +63,29 @@ new mongoose.Schema(
     type: String,
     enum: ["MORNING", "AFTERNOON", "EVENING"],
   },
+
+  isExcess: {
+    type: Boolean,
+    default: false,
+  },
+
+  monthlyIndex: {
+    type: Number,
+  },
+
+  leaveDaysToDeduct: {
+    type: Number,
+    default: 0,
+  },
+
+  deductCategoryName: {
+    type: String,
+    default: "Annual Leave",
+  },
 },
 { timestamps: true }
 );
+
 
 PermissionRequestSchema.index({
   employeeId: 1,

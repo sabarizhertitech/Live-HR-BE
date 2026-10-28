@@ -12,7 +12,23 @@ const salarySlipSchema = new mongoose.Schema({
   year: Number,
 
   netPay: Number,
+  totalEarnings: Number,
+  totalDeductions: Number,
   // amountInWords: String, // REMOVED - Use virtual
+
+  deductions: [
+    {
+      label: { type: String, trim: true },
+      amount: { type: Number, default: 0 }
+    }
+  ],
+
+  lopDays: {
+    type: Number
+  },
+  lopAmount: {
+    type: Number
+  },
 
   pdfUrl: String
 

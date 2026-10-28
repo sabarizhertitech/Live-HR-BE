@@ -1,4 +1,5 @@
-const Employee = require("../Models/Employee");
+
+const Employee = require("../Models/Employee");
 const EmployeeDetails = require("../Models/EmployeeDetails");
 const LeaveBalance = require("../Models/LeaveBalance");
 const deleteFromS3 = require("../utilities/s3Delete");
@@ -117,17 +118,22 @@ exports.deleteEmployee = async (req, res) => {
       if (filePath) {
         try {
           let fullPath;
+
           if (filePath.startsWith("/")) {
             fullPath = path.join(__dirname, "..", filePath);
           } else {
-            fullPath = path.join(__dirname, "..", "/", filePath);
+            fullPath = path.join(__dirname, "..", filePath);
           }
 
           if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
           }
-        } catch (fileError) {
-          console.warn("⚠️ Could not delete file:", filePath, fileError.message);
+        } catch (fileErr) {
+          console.warn(
+            "⚠️ Could not delete file:",
+            filePath,
+            fileErr.message
+          );
         }
       }
     });
@@ -146,6 +152,7 @@ exports.deleteEmployee = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Delete Employee Error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Failed to delete employee",

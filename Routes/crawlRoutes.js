@@ -10,6 +10,8 @@ router.get("/reports", crawlController.getReports);
 router.get("/reports/:id", crawlController.getReportDetails);
 router.delete("/reports/:id", crawlController.deleteReport);
 router.get("/dashboard/stats", crawlController.getDashboardStats);
+// Seperate API
+router.post("/crawl-and-report", crawlController.crawlAndGenerateReport);
 
 module.exports = router;
 

@@ -79,7 +79,7 @@ const ProfileFunction = {
         }
       }
 
-      
+
       const permDoc = await MenuPermission.findOne({ employeeId: userId });
       const permissions = permDoc ? permDoc.menus : [];
 
@@ -225,7 +225,7 @@ const ProfileFunction = {
       // MongoDB Unique Constraint (11000)
       if (err.code === 11000 || (err.name === "MongoError" && err.code === 11000)) {
         let field = "Field";
-        
+
         // Try to find the field name from keyPattern, keyValue, or the message
         if (err.keyPattern) {
           field = Object.keys(err.keyPattern)[0];
@@ -235,14 +235,14 @@ const ProfileFunction = {
           const match = err.message.match(/index: (?:.*\.)?\$?(\w+)_/);
           if (match) field = match[1];
         }
-        
+
         const fieldMap = {
           username: "Username",
           email: "Email",
           phone: "Phone number",
           empId: "Employee ID"
         };
-        
+
         const displayName = fieldMap[field] || (field.charAt(0).toUpperCase() + field.slice(1));
         return sendResponse(res, 400, false, `${displayName} already exists. Please try another one.`);
       }
@@ -521,7 +521,7 @@ const ProfileFunction = {
             <div style="font-size: 36px;font-weight: 700;letter-spacing: 12px;color: #1e1b4b;background: #fef2f2;padding: 16px 24px;border-radius: 8px;display: inline-block;margin: 12px 0;border: 1px solid #fecaca;">${otp}</div>
             <p style="color: #6b7280; font-size: 13px;">This OTP is valid for <strong>5 minutes</strong>. Do not share it with anyone.</p>
             <div style="background: #fef3c7; padding: 12px; border-radius: 8px; margin: 16px 0;">
-              <p style="color: #92400e; font-size: 13px; margin: 0;">⚠️ <strong>Security Alert:</strong> If you did not request this, please contact support immediately.</p>
+              <p style="color: #92400e; font-size: 13px; margin: 0;"><strong>Security Alert:</strong> If you did not request this, please contact support immediately.</p>
             </div>
             <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;" />
             <p style="color: #9ca3af; font-size: 12px;">ErtiTech Security Team</p>

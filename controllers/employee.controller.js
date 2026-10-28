@@ -9,6 +9,7 @@ const Notification = require("../Models/Notification");
 const { notifyAdmins, sendPushNotification } = require("../utilities/notificationService");
 const mongoose = require("mongoose");
 const { uploadToS3 } = require("../utilities/s3Upload");
+const deleteFromS3 = require("../utilities/s3Delete");
 const generateSignedUrl = require("../utilities/s3SignedUrl");
 const getCachedSignedUrl = require("../utilities/s3CachedUrl");
 const {
@@ -282,7 +283,10 @@ const updateEmployeeDetails = async (req, res) => {
     }
 
     let details = await EmployeeDetails.findOne({ empId: employeeId });
-    const isFirstTime = employee.isProfileCompleted === false;
+    const isFirstTime =
+      employee.isProfileCompleted === false ||
+      employee.profileApprovalStatus === "rejected" ||
+      details?.profileApprovalStatus === "rejected";
 
     /* ───────── PERMISSION CHECK ───────── */
     let allowedFields = null;
@@ -610,6 +614,13 @@ const updateEmployeeDetails = async (req, res) => {
             else fileName = `course_${course.id || course._id || idx}_certificate.${ext}`;
 
             const key = `ProfileDocs/${employee.empId}/${fileName}`;
+
+            // ✅ Replace previous document in S3
+            const oldCert = (typeof course.certificate === "string" ? course.certificate : null) || existingCourses[idx]?.certificate;
+            if (oldCert && oldCert !== key) {
+              await deleteFromS3(oldCert).catch(() => {});
+            }
+
             await uploadToS3(certFile.buffer, key, certFile.mimetype);
             certificateKey = key;
           }
@@ -814,6 +825,13 @@ const updateEmployeeDetails = async (req, res) => {
       if (!file || !file.buffer) continue;
       const ext = file.originalname.split(".").pop();
       const key = `ProfileDocs/${employee.empId}/${field}.${ext}`;
+
+      // ✅ Clean S3 replacement: delete prior document from S3 if key changed
+      const oldKey = details ? details[field] : null;
+      if (oldKey && oldKey !== key) {
+        await deleteFromS3(oldKey).catch(() => {});
+      }
+
       await uploadToS3(file.buffer, key, file.mimetype);
       updateData[field] = key;
       usedFields.push(field);
@@ -1233,6 +1251,7 @@ const getMyProfileWithSignedUrls = async (req, res) => {
       profileApprovalStatus: approvalStatus2,
       rejectionRemark: details.rejectionRemark || "",
       rejectedFields: details.rejectedFields || [],
+      approvedDocuments: details.approvedDocuments || [],
       submittedForApprovalAt: details.submittedForApprovalAt || null,
       reviewedAt: details.reviewedAt || employee.profileRejectedAt || null,
       profileRejectedAt: employee.profileRejectedAt || details.reviewedAt || null,
@@ -1803,6 +1822,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
       profileApprovalStatus: approvalStatus3,
       rejectionRemark: details.rejectionRemark || "",
       rejectedFields: details.rejectedFields || [],
+      approvedDocuments: details.approvedDocuments || [],
       submittedForApprovalAt: details.submittedForApprovalAt || null,
       reviewedAt: details.reviewedAt || null,
       empIdString: employee.empId,
@@ -1901,7 +1921,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
 
 /* =====================================================
    SEARCH EMPLOYEES
-   ⚠️ NO CHANGES — logic preserved exactly
+   NO CHANGES — logic preserved exactly
 ===================================================== */
 const searchEmployees = async (req, res) => {
   try {
@@ -1940,7 +1960,7 @@ const searchEmployees = async (req, res) => {
 
 /* =====================================================
    GET PROFILE COMPLETION (SELF)
-   ⚠️ NO CHANGES — logic preserved exactly
+   NO CHANGES — logic preserved exactly
 ===================================================== */
 const getProfileCompletion = async (req, res) => {
   try {
@@ -2260,14 +2280,14 @@ const getDocumentViewUrl = async (req, res) => {
       }
     }
 
-    // Generate signed URL with strictly 3 minutes (180 seconds) expiry
-    const signedUrl = await generateSignedUrl(s3Key, 180);
+    // Generate signed URL with strictly 2 minutes (120 seconds) expiry
+    const signedUrl = await generateSignedUrl(s3Key, 120);
 
     return res.json({
       success: true,
       url: signedUrl,
-      expiresIn: 180,
-      message: "Signed URL generated (expires in 3 minutes)",
+      expiresIn: 120,
+      message: "Signed URL generated (expires in 2 minutes)",
     });
   } catch (err) {
     console.error("❌ getDocumentViewUrl error:", err);
@@ -2403,7 +2423,7 @@ const adminReviewProfile = async (req, res) => {
           title: notifTitle,
           message: notifMsg,
           metadata: {
-            url: "/emp/my-details",
+            url: "/emp/my-details/edit",
             reason: remark.trim(),
             rejectionRemark: remark.trim(),
             rejectedFields: formattedFields,
@@ -2414,7 +2434,7 @@ const adminReviewProfile = async (req, res) => {
 
         await sendPushNotification([employee._id], notifTitle, notifMsg, {
           type: "PROFILE_REJECTED",
-          url: "/emp/my-details",
+          url: "/emp/my-details/edit",
           remark: remark.trim(),
         });
       } catch (nErr) {
@@ -2432,6 +2452,206 @@ const adminReviewProfile = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Server error reviewing employee profile",
+    });
+  }
+};
+
+/* ═══════════════════════════════════════════════════════════
+   ADMIN REVIEW SINGLE / MULTIPLE DOCUMENTS (Approve or Reject docs)
+═══════════════════════════════════════════════════════════════ */
+const adminReviewDocument = async (req, res) => {
+  try {
+    const { empId } = req.params;
+    const { documentField, documentId, documentLabel, action, remark, documentFields, documentIds } = req.body;
+
+    if (!["approve", "reject"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "Action must be 'approve' or 'reject'",
+      });
+    }
+
+    let employee = null;
+    if (mongoose.Types.ObjectId.isValid(empId)) {
+      employee = await Employee.findById(empId);
+    }
+    if (!employee) {
+      employee = await Employee.findOne({ empId });
+    }
+    if (!employee) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
+    }
+
+    let details = await EmployeeDetails.findOne({ empId: employee._id });
+    if (!details) {
+      details = await EmployeeDetails.create({
+        empId: employee._id,
+        empIdString: employee.empId,
+      });
+    }
+
+    const fieldsToProcess = [];
+    if (Array.isArray(documentFields) && documentFields.length > 0) {
+      fieldsToProcess.push(...documentFields);
+    }
+    if (Array.isArray(documentIds) && documentIds.length > 0) {
+      fieldsToProcess.push(...documentIds);
+    }
+    if (documentField) fieldsToProcess.push(documentField);
+    if (documentId) fieldsToProcess.push(documentId);
+
+    const uniqueFields = Array.from(new Set(fieldsToProcess.filter(Boolean)));
+    if (uniqueFields.length === 0) {
+      return res.status(400).json({ success: false, message: "documentField or documentFields is required" });
+    }
+
+    const relatedKeys = new Set();
+    uniqueFields.forEach((fieldKey) => {
+      relatedKeys.add(fieldKey);
+      if (fieldKey === "marksheet10" || fieldKey === "certificate10") {
+        relatedKeys.add("marksheet10");
+        relatedKeys.add("certificate10");
+      }
+      if (fieldKey === "marksheet12" || fieldKey === "certificate12") {
+        relatedKeys.add("marksheet12");
+        relatedKeys.add("certificate12");
+      }
+      if (
+        fieldKey.includes("courses") ||
+        fieldKey === "degreeCertificate" ||
+        String(fieldKey).startsWith("course_")
+      ) {
+        relatedKeys.add("courses");
+        relatedKeys.add("degreeCertificate");
+        relatedKeys.add(fieldKey);
+      }
+      if (
+        fieldKey.includes("professionalCertifications") ||
+        String(fieldKey).startsWith("prof_cert_")
+      ) {
+        relatedKeys.add("professionalCertifications");
+        relatedKeys.add(fieldKey);
+      }
+    });
+
+    details.rejectedFields = Array.isArray(details.rejectedFields) ? details.rejectedFields : [];
+    details.approvedDocuments = Array.isArray(details.approvedDocuments) ? details.approvedDocuments : [];
+
+    const adminUser = req.user;
+
+    if (action === "approve") {
+      // Remove from rejectedFields
+      details.rejectedFields = details.rejectedFields.filter((f) => !relatedKeys.has(f));
+
+      // Add to approvedDocuments
+      relatedKeys.forEach((k) => {
+        if (!details.approvedDocuments.includes(k)) {
+          details.approvedDocuments.push(k);
+        }
+      });
+
+      // If all rejected fields are cleared and profile was previously rejected, reset to pending
+      if (details.rejectedFields.length === 0 && details.profileApprovalStatus === "rejected") {
+        details.profileApprovalStatus = "pending";
+        details.rejectionRemark = "";
+        await Employee.findByIdAndUpdate(employee._id, {
+          $set: {
+            profileApprovalStatus: "pending",
+          },
+        });
+      }
+
+      details.reviewedAt = new Date();
+      details.reviewedBy = adminUser._id;
+      await details.save();
+
+      return res.json({
+        success: true,
+        message:
+          uniqueFields.length > 1
+            ? "Documents approved successfully"
+            : `${documentLabel || "Document"} approved successfully`,
+        data: {
+          approvedDocuments: details.approvedDocuments,
+          rejectedFields: details.rejectedFields,
+          profileApprovalStatus: details.profileApprovalStatus,
+        },
+      });
+    } else {
+      // REJECT
+      const rejRemark =
+        (remark && remark.trim()) ||
+        `Document "${documentLabel || uniqueFields.join(", ")}" was rejected. Please re-upload a clear and valid copy.`;
+
+      // Remove from approvedDocuments
+      details.approvedDocuments = details.approvedDocuments.filter((f) => !relatedKeys.has(f));
+
+      // Add to rejectedFields
+      relatedKeys.forEach((k) => {
+        if (!details.rejectedFields.includes(k)) {
+          details.rejectedFields.push(k);
+        }
+      });
+
+      details.profileApprovalStatus = "rejected";
+      details.rejectionRemark = rejRemark;
+      details.reviewedAt = new Date();
+      details.reviewedBy = adminUser._id;
+      await details.save();
+
+      await Employee.findByIdAndUpdate(employee._id, {
+        $set: {
+          isProfileCompleted: false,
+          profileApprovalStatus: "rejected",
+          profileRejectedAt: new Date(),
+        },
+      });
+
+      // Send notification to employee
+      const notifTitle = `Document Rejected: ${documentLabel || "Action Required"}`;
+      const notifMsg = `Your document "${documentLabel || uniqueFields.join(", ")}" was rejected: "${rejRemark}". Please re-upload only this document to continue.`;
+
+      try {
+        await Notification.create({
+          type: "PROFILE_REJECTED",
+          toEmployee: employee._id,
+          fromAdmin: true,
+          title: notifTitle,
+          message: notifMsg,
+          metadata: {
+            url: "/emp/my-details/edit",
+            reason: rejRemark,
+            rejectionRemark: rejRemark,
+            rejectedFields: details.rejectedFields,
+            rejectedDocument: documentLabel || fieldKey,
+            requestType: "document-rejection",
+          },
+        });
+
+        await sendPushNotification([employee._id], notifTitle, notifMsg, {
+          type: "PROFILE_REJECTED",
+          url: "/emp/my-details/edit",
+        });
+      } catch (nErr) {
+        console.error("Single document rejection notification error:", nErr);
+      }
+
+      return res.json({
+        success: true,
+        message: `${documentLabel || "Document"} rejected`,
+        data: {
+          approvedDocuments: details.approvedDocuments,
+          rejectedFields: details.rejectedFields,
+          profileApprovalStatus: "rejected",
+          rejectionRemark: rejRemark,
+        },
+      });
+    }
+  } catch (err) {
+    console.error("❌ adminReviewDocument error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Server error reviewing document",
     });
   }
 };
@@ -2471,10 +2691,10 @@ const saveCertifications = async (req, res) => {
       if (Array.isArray(parsed) && parsed.length > 0) {
         const files = req.files
           ? req.files.reduce((acc, f) => {
-              acc[f.fieldname] = acc[f.fieldname] || [];
-              acc[f.fieldname].push(f);
-              return acc;
-            }, {})
+            acc[f.fieldname] = acc[f.fieldname] || [];
+            acc[f.fieldname].push(f);
+            return acc;
+          }, {})
           : {};
 
         const existingCerts = Array.isArray(details.professionalCertifications)
@@ -2571,6 +2791,7 @@ module.exports = {
   getUserSentWishes,
   getDocumentViewUrl,
   adminReviewProfile,
+  adminReviewDocument,
   saveCertifications,
 };
 

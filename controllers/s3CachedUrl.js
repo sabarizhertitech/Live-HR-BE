@@ -105,7 +105,7 @@ const cleanDetails = (detailsObj) => {
 
 /* =====================================================
    PROFILE COMPLETION CALCULATION (weighted)
-   ⚠️ DO NOT CHANGE — existing logic preserved
+   DO NOT CHANGE — existing logic preserved
 ===================================================== */
 const calculateProfileCompletion = (data, employee = null) => {
   if (!data) return 0;
@@ -1316,7 +1316,7 @@ const getEmployeeByEmpIdString = async (req, res) => {
 
 /* =====================================================
    SEARCH EMPLOYEES
-   ⚠️ NO CHANGES — logic preserved exactly
+   NO CHANGES — logic preserved exactly
 ===================================================== */
 const searchEmployees = async (req, res) => {
   try {
@@ -1355,7 +1355,7 @@ const searchEmployees = async (req, res) => {
 
 /* =====================================================
    GET PROFILE COMPLETION (SELF)
-   ⚠️ NO CHANGES — logic preserved exactly
+   NO CHANGES — logic preserved exactly
 ===================================================== */
 const getProfileCompletion = async (req, res) => {
   try {

@@ -2,6 +2,13 @@ const express = require("express");
 const UsersController = require("../controllers/UsersController");
 const portalAuth = require("../middleware/portalAuth");
 const { getAllEmployees, deleteEmployee } = require("../controllers/ManageEmployee.controller");
+const {
+  requireHrEmployeeCanAdd,
+  requireHrEmployeeCanView,
+  requireHrEmployeeCanEdit,
+  requireHrEmployeeCanDeleteDocs,
+  requirePureAdmin,
+} = portalAuth;
 
 // ✅ Import getMyProfileWithSignedUrls — used by edit form so file previews work
 const {
@@ -18,6 +25,7 @@ const {
   getUserSentWishes,
   getDocumentViewUrl,
   adminReviewProfile,
+  adminReviewDocument,
   saveCertifications,
 } = require("../controllers/employee.controller");
 
@@ -102,22 +110,30 @@ Users.get(
 Users.post(
   "/add-employee",
   portalAuth.adminMiddleware,
+  requireHrEmployeeCanAdd,
   upload.single("photo"),
   UsersController.addEmployee
 );
 
-Users.get("/all-employee", portalAuth.adminMiddleware, getAllEmployees);
+Users.get(
+  "/all-employee",
+  portalAuth.adminMiddleware,
+  requireHrEmployeeCanView,
+  getAllEmployees
+);
 
 // ✅ Admin view of single employee — has signed URLs
 Users.get(
   "/employee/:empIdString",
   portalAuth.adminMiddleware,
+  requireHrEmployeeCanView,
   getEmployeeByEmpIdString
 );
 
 Users.delete(
   "/delete-employee/:empIdString",
   portalAuth.adminMiddleware,
+  requirePureAdmin,
   deleteEmployee
 );
 
@@ -126,6 +142,7 @@ Users.delete(
 Users.put(
   "/admin/employee/:empId/update",
   portalAuth.adminMiddleware,
+  requireHrEmployeeCanEdit,
   upload.any(),
   adminUpdateEmployee
 );
@@ -135,6 +152,12 @@ Users.put(
   "/admin/review-profile/:empId",
   portalAuth.adminMiddleware,
   adminReviewProfile
+);
+
+Users.put(
+  "/admin/review-document/:empId",
+  portalAuth.adminMiddleware,
+  adminReviewDocument
 );
 
 Users.get(
@@ -213,7 +236,7 @@ Users.delete("/employee/salary/:empId/:salaryId", portalAuth.adminMiddleware, Us
 Users.post("/employee/increment-documents", portalAuth.adminMiddleware, upload.any(), UsersController.uploadIncrementDocuments);
 Users.get("/employee/increment-documents/:empId", portalAuth.authMiddleware, UsersController.getIncrementDocuments);
 Users.delete("/employee/increment-documents/:empId/:docId", portalAuth.authMiddleware, UsersController.deleteIncrementDocuments);
-Users.delete("/employee/document/:empId", portalAuth.adminMiddleware, UsersController.deleteGeneralDocument);
+Users.delete("/employee/document/:empId", portalAuth.adminMiddleware, requireHrEmployeeCanDeleteDocs, UsersController.deleteGeneralDocument);
 
 Users.put("/employee/bank/:empId", portalAuth.adminMiddleware, UsersController.updateBankDetails);
 Users.delete("/employee/bank-history/:empId/:historyId", portalAuth.adminMiddleware, UsersController.deleteBankHistory);

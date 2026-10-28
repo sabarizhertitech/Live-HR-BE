@@ -179,6 +179,11 @@ const employeeDetailsSchema = new mongoose.Schema(
       default: [],
     },
 
+    approvedDocuments: {
+      type: [String],
+      default: [],
+    },
+
     submittedForApprovalAt: {
       type: Date
     },

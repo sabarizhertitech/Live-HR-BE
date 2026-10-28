@@ -282,6 +282,146 @@ function classifyFailure(err, stage, timeout = 30000, abortController = null) {
   };
 }
 
+function cleanFieldName(rawLabel, rawName, semanticType) {
+  let name = (rawLabel || "").trim();
+  if (!name || /form-field-input|input-|field-/i.test(name)) {
+    name = (rawName || "").trim();
+  }
+  if (!name || /form-field-input|input-|field-/i.test(name)) {
+    if (semanticType === "phone") return "Phone *";
+    if (semanticType === "name") return "Name";
+    if (semanticType === "email") return "Email *";
+    return "Form Field";
+  }
+  if (name.length > 50) {
+    if (/terms|condition|consent|promotional/i.test(name)) return "Terms & Conditions Checkbox";
+    return name.slice(0, 47) + "...";
+  }
+  return name;
+}
+
+/**
+ * Extracts failed form fields with clean field name, issue, and expected validation
+ * without verbose clutter or duplicate entries.
+ */
+function extractFormValidationIssues(contactForms = [], finalReport = null) {
+  const issues = [];
+  const seenKeys = new Set();
+
+  const addIssue = (fieldName, issue, expectedValidation) => {
+    const key = (fieldName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      issues.push({
+        fieldName,
+        issue,
+        expectedValidation,
+      });
+    }
+  };
+
+  // 1. Inspect contact forms and their individual fields
+  for (const form of contactForms) {
+    const fields = Array.isArray(form.fields) ? form.fields : [];
+    for (const field of fields) {
+      if (!field || typeof field !== "object") continue;
+
+      const failedTests = Array.isArray(field.tests)
+        ? field.tests.filter(t => t.passed === false || t.status === "FAIL")
+        : [];
+      const isFailed = field.overallFieldStatus === "FAIL" ||
+                       field.validationStatus === "FAIL" ||
+                       failedTests.length > 0;
+
+      if (!isFailed) continue;
+
+      const semanticType = (field.semanticType || "").toLowerCase();
+      const fieldType = (field.fieldType || field.type || "").toLowerCase();
+      const rawLabel = field.label || field.placeholder || "";
+      const rawName = field.name || field.fieldName || "";
+      const fieldName = cleanFieldName(rawLabel, rawName, semanticType);
+
+      if (semanticType === "phone" || fieldType === "tel" || /phone|tel|mobile/i.test(fieldName)) {
+        addIssue(
+          fieldName,
+          "Accepts letters and invalid phone numbers; validation appears only on blur.",
+          "Allow digits only and show validation errors immediately."
+        );
+      } else if (semanticType === "name" || /first.*name|last.*name|name/i.test(fieldName)) {
+        addIssue(
+          fieldName,
+          "Accepts numbers and special symbols.",
+          "Allow letters only (a-z, A-Z and spaces)."
+        );
+      } else if (semanticType === "email" || fieldType === "email" || /email/i.test(fieldName)) {
+        addIssue(
+          fieldName,
+          "Accepts invalid email format.",
+          "Allow valid email address only (user@domain.com)."
+        );
+      } else if (fieldType === "checkbox" || /checkbox|terms|consent/i.test(fieldName)) {
+        addIssue(
+          fieldName,
+          "Required consent checkbox is not enforced before submission.",
+          "Must be checked before form submission."
+        );
+      } else {
+        addIssue(
+          fieldName,
+          "Field failed input validation checks.",
+          "Ensure input constraints and required format are enforced."
+        );
+      }
+    }
+  }
+
+  // 2. Fallback check for fieldSummaries
+  if (issues.length === 0 && Array.isArray(finalReport?.formValidationSummary?.fieldSummaries)) {
+    for (const fs of finalReport.formValidationSummary.fieldSummaries) {
+      if (fs.status !== "FAIL") continue;
+      const fieldName = cleanFieldName(fs.label, fs.fieldName, fs.semanticType);
+      const isPhone = /phone|tel|mobile/i.test(fieldName + " " + (fs.fieldName || ""));
+      const isName = /first.*name|last.*name|name/i.test(fieldName + " " + (fs.fieldName || ""));
+      const isEmail = /email/i.test(fieldName + " " + (fs.fieldName || ""));
+      const isCheckbox = /checkbox|terms|consent/i.test(fieldName + " " + (fs.fieldName || ""));
+
+      if (isPhone) {
+        addIssue(
+          fieldName,
+          "Accepts letters and invalid phone numbers; validation appears only on blur.",
+          "Allow digits only and show validation errors immediately."
+        );
+      } else if (isName) {
+        addIssue(
+          fieldName,
+          "Accepts numbers and special symbols.",
+          "Allow letters only (a-z, A-Z and spaces)."
+        );
+      } else if (isEmail) {
+        addIssue(
+          fieldName,
+          "Accepts invalid email format.",
+          "Allow valid email address only (user@domain.com)."
+        );
+      } else if (isCheckbox) {
+        addIssue(
+          fieldName,
+          "Required consent checkbox is not enforced before submission.",
+          "Must be checked before form submission."
+        );
+      } else {
+        addIssue(
+          fieldName,
+          "Field failed input validation checks.",
+          "Ensure input constraints and required format are enforced."
+        );
+      }
+    }
+  }
+
+  return issues;
+}
+
 /**
  * Evaluates the 8 mandatory website information requirements and determines
  * compliance status ('Approved' | 'Moderate' | 'Risk') and descriptive remarks.
@@ -353,8 +493,9 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
       return true;
     });
 
-    // 7. Contact Us Form Validation (Only check form(s) belonging to Contact Us page)
-    let contactUsFormValidation = false;
+    // 7. Contact Us Form Validation
+    // A form is only validated if the website / Contact Us page contains a form.
+    // If the website does not contain any form, form validation is NOT mandatory and is skipped.
     const contactPages = safePages.filter(p => {
       const u = (p.url || "").toLowerCase();
       const pt = (p.pageType || "").toLowerCase();
@@ -364,44 +505,82 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
         /\bcontact\s*(us|me)?\b/i.test(title);
     });
 
+    const isExcludedForm = (form) => {
+      if (!form || typeof form !== "object") return true;
+      const formType = (form.formType || "").toLowerCase();
+      if (["login", "search", "newsletter", "auth"].includes(formType)) return true;
+      const fields = Array.isArray(form.fields) ? form.fields : (Array.isArray(form.inputs) ? form.inputs : []);
+      if (fields.length === 0 && (!form.totalFields || form.totalFields === 0)) return true;
+      if (fields.length === 1) {
+        const f = fields[0];
+        const meta = `${f.name || ""} ${f.fieldName || ""} ${f.id || ""} ${f.placeholder || ""}`.toLowerCase();
+        if (/\b(search|find|query|subscribe|newsletter)\b/i.test(meta)) return true;
+      }
+      return false;
+    };
+
+    const contactForms = [];
+
+    // 1. Check contact pages for forms
     for (const cp of contactPages) {
       const forms = Array.isArray(cp.forms) ? cp.forms : [];
       for (const form of forms) {
-        if (!form || typeof form !== "object") continue;
-        const formType = (form.formType || "").toLowerCase();
-        // Skip login, search, or newsletter forms
-        if (["login", "search", "newsletter", "auth"].includes(formType)) continue;
+        if (!isExcludedForm(form)) {
+          contactForms.push(form);
+        }
+      }
+    }
 
-        const fields = Array.isArray(form.fields) ? form.fields : (Array.isArray(form.inputs) ? form.inputs : []);
-        const fieldMetaStrings = fields.map(f => {
-          if (!f || typeof f !== "object") return "";
-          return `${f.name || ""} ${f.fieldName || ""} ${f.id || ""} ${f.type || ""} ${f.fieldType || ""} ${f.semanticType || ""}`.toLowerCase();
-        });
-
-        const hasContactFields = fieldMetaStrings.some(m => /\b(name|email|mail|phone|mobile|tel|message|comment|query|subject|feedback)\b/i.test(m));
-
-        if (hasContactFields || fields.length > 0) {
-          const isNotFailed = form.overallStatus !== "FAIL" && (form.failedTests || 0) === 0;
-          if (isNotFailed || form.overallStatus === "PASS" || form.overallStatus === "PARTIAL" || fields.length > 0) {
-            contactUsFormValidation = true;
-            break;
+    // 2. Fallback: check other pages if they contain a form specifically classified as contact/enquiry
+    if (contactForms.length === 0) {
+      for (const p of safePages) {
+        const forms = Array.isArray(p.forms) ? p.forms : [];
+        for (const form of forms) {
+          const formType = (form.formType || "").toLowerCase();
+          if (["contact", "enquiry"].includes(formType) && !isExcludedForm(form)) {
+            contactForms.push(form);
           }
         }
       }
-      if (contactUsFormValidation) break;
     }
 
-    // Fallback to formValidationSummary.forms for any contact page form
-    if (!contactUsFormValidation && Array.isArray(finalReport?.formValidationSummary?.forms)) {
+    // 3. Fallback: check aggregated forms summary
+    if (contactForms.length === 0 && Array.isArray(finalReport?.formValidationSummary?.forms)) {
       for (const form of finalReport.formValidationSummary.forms) {
-        if (!form || typeof form !== "object") continue;
         const pageUrl = (form.pageUrl || "").toLowerCase();
         const formType = (form.formType || "").toLowerCase();
-        const isContactPageForm = formType === "contact" || /(?:contact|get[-_]?in[-_]?touch|reach[-_]?us)/i.test(pageUrl);
-        if (isContactPageForm && form.overallStatus !== "FAIL") {
-          contactUsFormValidation = true;
-          break;
+        const isContactForm = formType === "contact" || formType === "enquiry" || /(?:contact|get[-_]?in[-_]?touch|reach[-_]?us)/i.test(pageUrl);
+        if (isContactForm && !isExcludedForm(form)) {
+          contactForms.push(form);
         }
+      }
+    }
+
+    const hasContactUsForm = contactForms.length > 0;
+    let contactUsFormValidation = true;
+    let formValidationIssues = [];
+
+    if (hasContactUsForm) {
+      // Form was found on the website: check that the form validation is correct (no failures)
+      const formHasFailure = (form) => {
+        if (form.overallStatus === "FAIL") return true;
+        if (typeof form.failedTests === "number" && form.failedTests > 0) return true;
+        if (Array.isArray(form.fields)) {
+          return form.fields.some(f => {
+            if (!f || typeof f !== "object") return false;
+            if (f.overallFieldStatus === "FAIL" || f.validationStatus === "FAIL") return true;
+            if (Array.isArray(f.tests) && f.tests.some(t => t.passed === false || t.status === "FAIL")) return true;
+            return false;
+          });
+        }
+        return false;
+      };
+
+      const hasFailingForm = contactForms.some(formHasFailure);
+      contactUsFormValidation = !hasFailingForm;
+
+      if (!contactUsFormValidation) {
+        formValidationIssues = extractFormValidationIssues(contactForms, finalReport);
       }
     }
 
@@ -420,7 +599,6 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
       address,
       phoneNumber,
       email,
-      contactUsFormValidation,
       aboutUs,
     };
 
@@ -431,9 +609,14 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
       { key: "address", label: "Address" },
       { key: "phoneNumber", label: "Phone Number" },
       { key: "email", label: "Email" },
-      { key: "contactUsFormValidation", label: "Contact Us Form Validation" },
       { key: "aboutUs", label: "About Us" },
     ];
+
+    // Form validation is only checked and included if the website actually contains a form
+    if (hasContactUsForm) {
+      mandatoryData.contactUsFormValidation = contactUsFormValidation;
+      labels.push({ key: "contactUsFormValidation", label: "Contact Us Form Validation" });
+    }
 
     const presentItems = labels.filter(item => mandatoryData[item.key]);
     const missingItems = labels.filter(item => !mandatoryData[item.key]);
@@ -457,6 +640,7 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
       status,
       remarks,
       mandatoryData,
+      formValidationIssues,
     };
   } catch (evalErr) {
     console.error("[evaluateMandatoryWebsiteCompliance] Error during evaluation:", evalErr);
@@ -473,6 +657,7 @@ function evaluateMandatoryWebsiteCompliance(finalReport, pages = []) {
         contactUsFormValidation: false,
         aboutUs: false,
       },
+      formValidationIssues: [],
     };
   }
 }
@@ -655,12 +840,16 @@ exports.crawlAndGenerateReport = async (req, res) => {
       const complianceEvaluation = evaluateMandatoryWebsiteCompliance(finalReport, pages);
 
       // --------------------------------------------------
-      // 11. Return clean compliance response (status, remarks)
+      // 11. Return clean compliance response (status, remarks, formValidationIssues)
       // --------------------------------------------------
       const responsePayload = {
         status: complianceEvaluation.status,
         remarks: complianceEvaluation.remarks,
       };
+
+      if (Array.isArray(complianceEvaluation.formValidationIssues) && complianceEvaluation.formValidationIssues.length > 0) {
+        responsePayload.formValidationIssues = complianceEvaluation.formValidationIssues;
+      }
 
       return res.status(200).json(responsePayload);
     } catch (err) {

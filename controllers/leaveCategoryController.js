@@ -11,17 +11,26 @@ const {
 } = require("../utilities/financialYearUtil");
 const { isEmployeeInProbation } = require("../utilities/probationHelper");
 const { validateAndProcessTiers } = require("../utilities/leaveValidationHelper");
+const {
+  isAnnualLeaveCategory,
+  isMatchingDeductCategory,
+  getPermissionConfig,
+  getBulkPermissionDeductions,
+} = require("../utilities/permissionLeaveUtil");
 
 const leaveCategoryController = {
   // Get all categories for a specific financial year
   getAllCategories: async (req, res) => {
     try {
       const year = req.query.year || getCurrentFinancialYear();
-      let doc = await LeaveCategory.findOne({ financialYear: year });
+      let doc = await LeaveCategory.findOne({ financialYear: year }).lean();
       if (doc && doc.categories && doc.categories.length > 0 && doc.isReviewed && doc.status === "pending") {
+        await LeaveCategory.updateOne(
+          { _id: doc._id },
+          { $set: { status: "approved", approvedDate: doc.approvedDate || new Date() } }
+        );
         doc.status = "approved";
         doc.approvedDate = doc.approvedDate || new Date();
-        await doc.save();
       }
       const categories = doc ? doc.categories : [];
       return res.status(200).json({
@@ -289,6 +298,11 @@ const leaveCategoryController = {
         const balMap = {};
         leaveBalDocs.forEach(b => { balMap[b.employeeId.toString()] = b.leaveBalances || {}; });
 
+        const permConfig = await getPermissionConfig();
+        const bulkPermDeductions = await getBulkPermissionDeductions(employees.map(e => e._id), year);
+        const alCat = doc.categories.find(c => isMatchingDeductCategory(c.name, permConfig.deductCategoryName)) ||
+          doc.categories.find(c => isAnnualLeaveCategory(c.name));
+
         const currentDate = new Date();
         const bulkOps = employees.map((emp) => {
           const joiningDate = emp.dateJoined || emp.createdAt;
@@ -296,18 +310,37 @@ const leaveCategoryController = {
           const serviceMonths = calculateServiceMonths(joiningDate, currentDate);
           const existingBalances = balMap[emp._id.toString()] || {};
           const yearBalances = { ...(existingBalances[year] || {}) };
+          const empPermDays = bulkPermDeductions[emp._id.toString()] || 0;
 
           doc.categories.forEach((cat) => {
             if (!cat || !cat.name) return;
             const allowedLeaves = calculateCategoryLeaves(cat, serviceMonths, inProbation);
             const existingCatBalance = yearBalances[cat.name] || {};
-            const used = existingCatBalance.used || 0;
-            const remaining = Math.max(0, allowedLeaves - used);
-            yearBalances[cat.name] = {
-              total: allowedLeaves,
-              used: used,
-              remaining: remaining,
-            };
+            let used = existingCatBalance.used || 0;
+
+            if (alCat && cat.name === alCat.name && empPermDays > 0) {
+              const regularUsed = existingCatBalance.regularUsed !== undefined
+                ? existingCatBalance.regularUsed
+                : (existingCatBalance.permissionDeducted !== undefined
+                    ? Math.max(0, used - existingCatBalance.permissionDeducted)
+                    : used);
+              const availableAL = Math.max(0, allowedLeaves - regularUsed);
+              const deductedFromAL = Math.min(availableAL, empPermDays);
+              used = regularUsed + deductedFromAL;
+              yearBalances[cat.name] = {
+                total: allowedLeaves,
+                used: used,
+                remaining: Math.max(0, allowedLeaves - used),
+                regularUsed,
+                permissionDeducted: deductedFromAL,
+              };
+            } else {
+              yearBalances[cat.name] = {
+                total: allowedLeaves,
+                used: used,
+                remaining: Math.max(0, allowedLeaves - used),
+              };
+            }
           });
 
           return {
@@ -557,6 +590,12 @@ const leaveCategoryController = {
       const balMap = {};
       leaveBalDocs.forEach(b => { balMap[b.employeeId.toString()] = b.leaveBalances || {}; });
 
+      const permConfig = await getPermissionConfig();
+      const isAl = isMatchingDeductCategory(savedCategory.name, permConfig.deductCategoryName) || isAnnualLeaveCategory(savedCategory.name);
+      const bulkPermDeductions = isAl
+        ? await getBulkPermissionDeductions(employees.map(e => e._id), targetYear)
+        : {};
+
       const currentDate = new Date();
 
       const bulkOps = employees.map(emp => {
@@ -567,14 +606,41 @@ const leaveCategoryController = {
 
         const balances = balMap[emp._id.toString()] || {};
         const yearBalances = { ...(balances[targetYear] || {}) };
-        const used = yearBalances[savedCategory.name]?.used || 0;
-        const remaining = Math.max(0, allowedLeaves - used);
+        const existingCatBalance = yearBalances[savedCategory.name] || {};
+        let used = existingCatBalance.used || 0;
 
-        yearBalances[savedCategory.name] = {
-          total: allowedLeaves,
-          used: used,
-          remaining: remaining
-        };
+        if (isAl) {
+          const empPermDays = bulkPermDeductions[emp._id.toString()] || 0;
+          if (empPermDays > 0) {
+            const regularUsed = existingCatBalance.regularUsed !== undefined
+              ? existingCatBalance.regularUsed
+              : (existingCatBalance.permissionDeducted !== undefined
+                  ? Math.max(0, used - existingCatBalance.permissionDeducted)
+                  : used);
+            const availableAL = Math.max(0, allowedLeaves - regularUsed);
+            const deductedFromAL = Math.min(availableAL, empPermDays);
+            used = regularUsed + deductedFromAL;
+            yearBalances[savedCategory.name] = {
+              total: allowedLeaves,
+              used: used,
+              remaining: Math.max(0, allowedLeaves - used),
+              regularUsed,
+              permissionDeducted: deductedFromAL,
+            };
+          } else {
+            yearBalances[savedCategory.name] = {
+              total: allowedLeaves,
+              used: used,
+              remaining: Math.max(0, allowedLeaves - used)
+            };
+          }
+        } else {
+          yearBalances[savedCategory.name] = {
+            total: allowedLeaves,
+            used: used,
+            remaining: Math.max(0, allowedLeaves - used)
+          };
+        }
 
         return {
           updateOne: {
@@ -708,6 +774,12 @@ const leaveCategoryController = {
       const balMap = {};
       leaveBalDocs.forEach(b => { balMap[b.employeeId.toString()] = b.leaveBalances || {}; });
 
+      const permConfig = await getPermissionConfig();
+      const isAl = isMatchingDeductCategory(trimmedName, permConfig.deductCategoryName) || isAnnualLeaveCategory(trimmedName);
+      const bulkPermDeductions = isAl
+        ? await getBulkPermissionDeductions(employees.map(e => e._id), targetYear)
+        : {};
+
       const currentDate = new Date();
 
       const bulkOps = employees.map(emp => {
@@ -720,13 +792,32 @@ const leaveCategoryController = {
         const yearBalances = { ...(balances[targetYear] || {}) };
 
         const oldBalance = yearBalances[oldName] || { used: 0 };
-        const used = oldBalance.used || 0;
+        let used = oldBalance.used || 0;
+
+        if (isAl) {
+          const empPermDays = bulkPermDeductions[emp._id.toString()] || 0;
+          if (empPermDays > 0) {
+            const regularUsed = oldBalance.regularUsed !== undefined
+              ? oldBalance.regularUsed
+              : (oldBalance.permissionDeducted !== undefined
+                  ? Math.max(0, used - oldBalance.permissionDeducted)
+                  : used);
+            const availableAL = Math.max(0, allowedLeaves - regularUsed);
+            const deductedFromAL = Math.min(availableAL, empPermDays);
+            used = regularUsed + deductedFromAL;
+            oldBalance.regularUsed = regularUsed;
+            oldBalance.permissionDeducted = deductedFromAL;
+          }
+        }
+
         const remaining = Math.max(0, allowedLeaves - used);
 
         const updatedBalance = {
           total: allowedLeaves,
           used: used,
-          remaining: remaining
+          remaining: remaining,
+          ...(oldBalance.regularUsed !== undefined ? { regularUsed: oldBalance.regularUsed } : {}),
+          ...(oldBalance.permissionDeducted !== undefined ? { permissionDeducted: oldBalance.permissionDeducted } : {}),
         };
 
         if (oldName !== trimmedName) {
@@ -941,6 +1032,11 @@ const leaveCategoryController = {
         const balMap = {};
         leaveBalDocs.forEach(b => { balMap[b.employeeId.toString()] = b.leaveBalances || {}; });
 
+        const permConfig = await getPermissionConfig();
+        const bulkPermDeductions = await getBulkPermissionDeductions(employees.map(e => e._id), targetYear);
+        const alCat = activeCategories.find(c => isMatchingDeductCategory(c.name, permConfig.deductCategoryName)) ||
+          activeCategories.find(c => isAnnualLeaveCategory(c.name));
+
         const currentDate = new Date();
 
         const bulkOps = employees.map((emp) => {
@@ -950,20 +1046,38 @@ const leaveCategoryController = {
 
           const existingBalances = balMap[emp._id.toString()] || {};
           const yearBalances = { ...(existingBalances[targetYear] || {}) };
+          const empPermDays = bulkPermDeductions[emp._id.toString()] || 0;
 
           activeCategories.forEach((cat) => {
             if (!cat || !cat.name) return;
             const allowedLeaves = calculateCategoryLeaves(cat, serviceMonths, inProbation);
 
             const existingCatBalance = yearBalances[cat.name] || {};
-            const used = existingCatBalance.used || 0;
-            const remaining = Math.max(0, allowedLeaves - used);
+            let used = existingCatBalance.used || 0;
 
-            yearBalances[cat.name] = {
-              total: allowedLeaves,
-              used: used,
-              remaining: remaining,
-            };
+            if (alCat && cat.name === alCat.name && empPermDays > 0) {
+              const regularUsed = existingCatBalance.regularUsed !== undefined
+                ? existingCatBalance.regularUsed
+                : (existingCatBalance.permissionDeducted !== undefined
+                    ? Math.max(0, used - existingCatBalance.permissionDeducted)
+                    : used);
+              const availableAL = Math.max(0, allowedLeaves - regularUsed);
+              const deductedFromAL = Math.min(availableAL, empPermDays);
+              used = regularUsed + deductedFromAL;
+              yearBalances[cat.name] = {
+                total: allowedLeaves,
+                used: used,
+                remaining: Math.max(0, allowedLeaves - used),
+                regularUsed,
+                permissionDeducted: deductedFromAL,
+              };
+            } else {
+              yearBalances[cat.name] = {
+                total: allowedLeaves,
+                used: used,
+                remaining: Math.max(0, allowedLeaves - used),
+              };
+            }
           });
 
           return {

@@ -33,7 +33,7 @@ function buildMonthsFromFlatHolidays(holidays) {
       month = h.date.getMonth() + 1;
       day = h.date.getDate();
     } else {
-      console.warn("⚠️ Skipping holiday with invalid date:", h);
+      console.warn("Skipping holiday with invalid date:", h);
       return;
     }
     if (!monthsMap[month]) monthsMap[month] = { month, governmentHolidays: [], specialDays: [] };
@@ -72,7 +72,7 @@ async function syncApprovedToFlatHoliday(assignment) {
     }
 
     if (!bulk.length) {
-      console.warn(`⚠️ No gov holidays to sync for year ${year}`);
+      console.warn(`No gov holidays to sync for year ${year}`);
       return;
     }
 
@@ -177,7 +177,7 @@ exports.assignCalendar = async (req, res) => {
     try {
       const title = "Holiday Management Assigned";
       const body = `The Admin has assigned you to manage the Holiday calendar for ${year}.`;
-      
+
       await sendPushNotification(employeeId, title, body, {
         assignmentId: assignment._id.toString(),
         year: year,
@@ -467,7 +467,7 @@ exports.updateGovernmentHolidays = async (req, res) => {
     const bulk = [];
     for (const h of holidays) {
       if (!h.date || !h.name) continue;
-      
+
       let formattedDate;
       if (typeof h.date === "string" && h.date.length >= 10) {
         formattedDate = h.date.substring(0, 10);
@@ -479,7 +479,7 @@ exports.updateGovernmentHolidays = async (req, res) => {
           continue;
         }
       }
-      
+
       if (!formattedDate.startsWith(`${year}-`)) {
         continue;
       }
@@ -638,7 +638,7 @@ exports.createSpecialDay = async (req, res) => {
     }
 
     let formattedDate = typeof date === "string" ? date.substring(0, 10) : new Date(date).toISOString().substring(0, 10);
-    
+
     const exists = await SpecialDay.findOne({ date: formattedDate, name });
     if (exists) {
       return res.status(400).json({ success: false, message: "Special day already exists for this exact date." });
@@ -647,10 +647,10 @@ exports.createSpecialDay = async (req, res) => {
     const newSpecialDay = new SpecialDay({ date: formattedDate, name });
     await newSpecialDay.save();
 
-    return res.status(201).json({ 
-      success: true, 
-      message: "Special day created successfully", 
-      data: { _id: newSpecialDay._id, name: newSpecialDay.name, date: newSpecialDay.date } 
+    return res.status(201).json({
+      success: true,
+      message: "Special day created successfully",
+      data: { _id: newSpecialDay._id, name: newSpecialDay.name, date: newSpecialDay.date }
     });
   } catch (error) {
     console.error("❌ createSpecialDay error:", error);
@@ -858,7 +858,7 @@ exports.submitAssignment = async (req, res) => {
     try {
       const title = "Holiday Calendar Submitted";
       const body = `${empName} has sent the ${assignment.year} holiday list. Please check and approve it.`;
-      
+
       await notifyAdmins(title, body, {
         assignmentId: assignment._id.toString(),
         year: assignment.year,

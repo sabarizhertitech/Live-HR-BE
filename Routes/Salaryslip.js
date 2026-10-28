@@ -5,6 +5,10 @@ const router = express.Router();
 
 const portalAuth = require("../middleware/portalAuth");
 const SalarySlipController = require("../controllers/SalarySlipController");
+const {
+  requireHrSlipWrite,
+  requireHrSlipDelete,
+} = portalAuth;
 
 /* =========================================================
    ADMIN ROUTES
@@ -14,6 +18,7 @@ const SalarySlipController = require("../controllers/SalarySlipController");
 router.post(
   "/admin/generate-salary-slip",
   portalAuth.adminMiddleware,
+  requireHrSlipWrite,
   SalarySlipController.generateSalarySlip
 );
 
@@ -21,6 +26,7 @@ router.post(
 router.post(
   "/admin/generate-multiple-salary-slip",
   portalAuth.adminMiddleware,
+  requireHrSlipWrite,
   SalarySlipController.generateMultipleSalarySlip
 );
 
@@ -62,6 +68,7 @@ router.get(
 router.delete(
   "/admin/salary-slip/:slipId",
   portalAuth.adminMiddleware,
+  requireHrSlipDelete,
   SalarySlipController.deleteSalarySlip
 );
 
@@ -69,6 +76,7 @@ router.delete(
 router.post(
   "/admin/delete-multiple-salary-slips",
   portalAuth.adminMiddleware,
+  requireHrSlipDelete,
   SalarySlipController.deleteMultipleSalarySlips
 );
 

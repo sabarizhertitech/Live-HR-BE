@@ -12,7 +12,7 @@ const reminderJob = cron.schedule("0 0 15 3 *", async () => {
     const admins = await Employee.find({ role: "admin", employmentStatus: "active" });
 
     if (admins.length === 0) {
-      console.log("⚠️ No admins found to send yearly reminder.");
+      console.log("No admins found to send yearly reminder.");
       return;
     }
 

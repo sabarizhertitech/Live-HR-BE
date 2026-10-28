@@ -33,11 +33,11 @@ const rolloverJob = cron.schedule("0 0 1 4 *", async () => {
       const prevYearDoc = await LeaveCategory.findOne({ financialYear: prevYear });
       const categoriesToCopy = prevYearDoc
         ? prevYearDoc.categories.map((c) => ({
-            name: c.name,
-            leaveCount: c.leaveCount,
-            eligibleMonths: c.eligibleMonths,
-            tiers: c.tiers
-          }))
+          name: c.name,
+          leaveCount: c.leaveCount,
+          eligibleMonths: c.eligibleMonths,
+          tiers: c.tiers
+        }))
         : [];
 
       newYearDoc = new LeaveCategory({
@@ -49,7 +49,7 @@ const rolloverJob = cron.schedule("0 0 1 4 *", async () => {
 
     const activeCategories = newYearDoc.categories || [];
     if (activeCategories.length === 0) {
-      console.log("⚠️ No Leave Categories found for the new financial year. Skipping rollover.");
+      console.log("No Leave Categories found for the new financial year. Skipping rollover.");
       return;
     }
 

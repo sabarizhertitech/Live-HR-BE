@@ -281,9 +281,16 @@ exports.createDailyUpdate = async (req, res) => {
           delete entry._doc.referenceId;
         }
         if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
-          entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
-        } else if (!entry.workUpdateRefId) {
-          entry.workUpdateRefId = entry._id;
+          const incomingRef = req.body.workUpdateRefId.toString();
+          if (incomingRef === entry._id.toString()) {
+            entry.set('workUpdateRefId', undefined);
+            if (entry._doc) delete entry._doc.workUpdateRefId;
+          } else {
+            entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+          }
+        } else {
+          entry.set('workUpdateRefId', undefined);
+          if (entry._doc) delete entry._doc.workUpdateRefId;
         }
       }
       entry.description = (description || "").trim();
@@ -323,10 +330,6 @@ exports.createDailyUpdate = async (req, res) => {
       console.log(`[CreateDailyUpdate] Creating new DailyWorkUpdate entry.`);
       entry = new DailyWorkUpdate(entryData);
       await entry.save();
-      if (!finalPhaseId && !entry.workUpdateRefId) {
-        entry.workUpdateRefId = entry._id;
-        await entry.save();
-      }
     }
 
     // --- SYNC WITH PARENT TASK MODEL ---
@@ -434,6 +437,22 @@ exports.updateDailyUpdate = async (req, res) => {
       return res.status(403).json({ success: false, message: "Unauthorized to modify this work update" });
     }
 
+    if (!isAdmin && (entry.status || "").toLowerCase() === "completed") {
+      const entryDate = new Date(entry.updateDate || entry.createdAt);
+      const today = new Date();
+      const isToday =
+        entryDate.getFullYear() === today.getFullYear() &&
+        entryDate.getMonth() === today.getMonth() &&
+        entryDate.getDate() === today.getDate();
+
+      if (!isToday) {
+        return res.status(403).json({
+          success: false,
+          message: "Completed work updates from previous days cannot be edited."
+        });
+      }
+    }
+
     entry.description = (description || entry.description || "").trim();
     entry.title = (phase || title || entry.title || "").trim();
     entry.status = status || phaseStatus || entry.status;
@@ -476,8 +495,21 @@ exports.updateDailyUpdate = async (req, res) => {
       }
     }
 
-    if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
-      entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+    const isPhaseOrTask = Boolean(entry.phaseId || resolvedPhaseId || entry.referenceId);
+
+    if (!isPhaseOrTask) {
+      if (req.body.workUpdateRefId && mongoose.Types.ObjectId.isValid(req.body.workUpdateRefId)) {
+        const incomingRef = req.body.workUpdateRefId.toString();
+        if (incomingRef === entry._id.toString()) {
+          entry.set('workUpdateRefId', undefined);
+          if (entry._doc) delete entry._doc.workUpdateRefId;
+        } else {
+          entry.workUpdateRefId = new mongoose.Types.ObjectId(req.body.workUpdateRefId);
+        }
+      } else if (req.body.workUpdateRefId === null || req.body.workUpdateRefId === "") {
+        entry.set('workUpdateRefId', undefined);
+        if (entry._doc) delete entry._doc.workUpdateRefId;
+      }
     }
 
     entry.task = undefined;
@@ -732,7 +764,7 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
       {
         $lookup: {
           from: "tasks",
-          let: { updProj: "$project", updCat: "$category", updPhase: "$phaseId", updRef: "$referenceId", updTask: "$task" },
+          let: { updProj: "$project", updCat: "$category", updPhase: { $ifNull: ["$phaseId", "$taskPhaseId"] }, updRef: "$referenceId", updTask: "$task", updTitle: { $ifNull: ["$taskTitle", "$title"] } },
           pipeline: [
             {
               $match: {
@@ -741,7 +773,12 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
                     {
                       $and: [
                         { $ne: [{ $ifNull: ["$$updTask", null] }, null] },
-                        { $eq: ["$_id", "$$updTask"] }
+                        {
+                          $or: [
+                            { $eq: ["$_id", "$$updTask"] },
+                            { $eq: [{ $toString: "$_id" }, { $toString: "$$updTask" }] }
+                          ]
+                        }
                       ]
                     },
                     {
@@ -754,6 +791,12 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
                       $and: [
                         { $ne: [{ $ifNull: ["$$updRef", null] }, null] },
                         { $in: ["$$updRef", { $ifNull: ["$phases._id", []] }] }
+                      ]
+                    },
+                    {
+                      $and: [
+                        { $ne: [{ $ifNull: ["$$updTitle", null] }, null] },
+                        { $eq: [{ $toLower: "$taskTitle" }, { $toLower: "$$updTitle" }] }
                       ]
                     }
                   ]
@@ -797,9 +840,9 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
             { $ifNull: ["$taskInfo.pages", []] }
           ]
         },
-        phaseId: { $ifNull: ["$phaseId", "$referenceId", null] },
+        phaseId: { $ifNull: ["$phaseId", "$taskPhaseId", "$referenceId", null] },
         referenceId: { $ifNull: ["$referenceId", null] },
-        taskPhaseId: { $ifNull: ["$phaseId", "$referenceId", null] },
+        taskPhaseId: { $ifNull: ["$taskPhaseId", "$phaseId", "$referenceId", null] },
         taskPhaseStatus: {
           $let: {
             vars: {
@@ -862,10 +905,11 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
         note: "$description",
         phase: "$title",
         phaseStatus: "$status",
+        taskDetails: { $ifNull: ["$taskInfo.taskDetails", ""] },
         task: {
           _id: { $ifNull: ["$taskInfo._id", "standalone"] },
           taskTitle: { $ifNull: ["$taskInfo.taskTitle", "$title"] },
-          taskDetails: { $ifNull: ["$taskInfo.taskDetails", "$description"] },
+          taskDetails: { $ifNull: ["$taskInfo.taskDetails", ""] },
           category: { $ifNull: ["$taskInfo.category", "$category"] },
           project: { $ifNull: ["$taskInfo.project", "$project"] },
           workType: { $ifNull: ["$taskInfo.workType", ""] },
@@ -884,12 +928,29 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
     const combined = await DailyWorkUpdate.aggregate(dailyPipeline);
 
     combined.forEach(item => {
-      const isTaskPhase = Boolean(item.task && item.task._id && item.task._id !== "standalone" && (item.phaseId || item.referenceId));
+      const isTaskPhase = Boolean(
+        (item.task && item.task._id && item.task._id !== "standalone" && (item.phaseId || item.referenceId || item.taskPhaseId)) ||
+        (item.task && Array.isArray(item.task.phases) && item.task.phases.length > 0 && item.task.phases.some(p => p.phaseTitle && p.phaseTitle.trim().toLowerCase() === (item.phase || item.title || "").trim().toLowerCase()))
+      );
       if (isTaskPhase && item.task && Array.isArray(item.task.phases) && item.task.phases.length > 0) {
-        const matched = item.task.phases.find(p =>
-          (p._id && (p._id.toString() === item.phaseId?.toString() || p._id.toString() === item.referenceId?.toString())) ||
-          (p.phaseTitle && p.phaseTitle.trim().toLowerCase() === (item.phase || item.title || "").trim().toLowerCase())
-        );
+        const pIdStr = (item.phaseId || item.taskPhaseId || item.referenceId) ? String(item.phaseId || item.taskPhaseId || item.referenceId) : null;
+        const pTitleStr = (item.phase || item.title || "").trim().toLowerCase();
+
+        const matchedIndex = item.task.phases.findIndex(p => {
+          if (!p) return false;
+          if (pIdStr && p._id && String(p._id) === pIdStr) return true;
+          if (pTitleStr && p.phaseTitle && p.phaseTitle.trim().toLowerCase() === pTitleStr) return true;
+          return false;
+        });
+        const matched = matchedIndex !== -1 ? item.task.phases[matchedIndex] : null;
+
+        if (matchedIndex !== -1) {
+          item.phaseNumber = matchedIndex + 1;
+        } else {
+          const matchTitle = (item.title || item.phase || "").match(/(?:^|\b)phase\s*(\d+)\b/i);
+          item.phaseNumber = matchTitle ? parseInt(matchTitle[1], 10) : 1;
+        }
+
         if (matched && matched.workingDays !== undefined) {
           item.phaseWorkingDays = matched.workingDays;
         } else if (item.task.phases.length === 1 && item.task.phases[0].workingDays !== undefined) {
@@ -897,6 +958,7 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
         }
       } else {
         item.phaseWorkingDays = null;
+        item.phaseNumber = null;
       }
       if (isTaskPhase && item.task && item.task._id && item.task._id !== "standalone") {
         item.overallTaskWorkingDays = calculateOverallTaskWorkingDays(item.task);
@@ -905,22 +967,95 @@ exports.getAllDailyWorkUpdates = async (req, res) => {
       }
     });
 
-    // SORT BY DATE
-    combined.sort((a, b) => {
-      const getLocalDateString = (d) => {
-        if (!d) return "";
-        const dateObj = new Date(d);
-        if (isNaN(dateObj.getTime())) return "";
-        return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
-      };
+    // Secondary pass: ensure updates under the same task have sequential phase numbers 1, 2, 3, 4, 5
+    const taskGroups = {};
+    combined.forEach(item => {
+      const isTaskPhase = Boolean(item.task && item.task._id && item.task._id !== "standalone" && (item.phaseId || item.referenceId || item.taskPhaseId));
+      if (isTaskPhase && item.task?._id) {
+        const tId = String(item.task._id);
+        if (!taskGroups[tId]) taskGroups[tId] = [];
+        taskGroups[tId].push(item);
+      }
+    });
 
-      const dateStrA = getLocalDateString(a.updateDate);
-      const dateStrB = getLocalDateString(b.updateDate);
+    Object.values(taskGroups).forEach(group => {
+      if (group.length > 1) {
+        const allSame = group.every(it => it.phaseNumber === group[0].phaseNumber);
+        if (allSame) {
+          const sortedGroup = [...group].sort((a, b) => {
+            const timeA = new Date(a.updateDate || a.createdAt || 0).getTime();
+            const timeB = new Date(b.updateDate || b.createdAt || 0).getTime();
+            if (timeA !== timeB) return timeA - timeB;
+            return String(a._id || "").localeCompare(String(b._id || ""));
+          });
+          sortedGroup.forEach((it, idx) => {
+            it.phaseNumber = idx + 1;
+          });
+        }
+      }
+    });
+
+    // Helper to get local date string YYYY-MM-DD
+    const getLocalDateString = (d) => {
+      if (!d) return "";
+      const dateObj = new Date(d);
+      if (isNaN(dateObj.getTime())) return "";
+      return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
+    };
+
+    const getTaskId = (u) => {
+      if (!u) return null;
+      if (u.task?._id && u.task._id !== "standalone") return String(u.task._id);
+      if (u.task && u.task !== "standalone" && typeof u.task === "string") return u.task;
+      if (u.taskId && u.taskId !== "standalone") return String(u.taskId);
+      return null;
+    };
+
+    const getTaskTitle = (u) => {
+      return (u.task?.taskTitle || (!u.phaseId && !u.taskPhaseId && !u.referenceId ? "" : u.title) || "").trim().toLowerCase();
+    };
+
+    // SORT UPDATES
+    // 1. Phases belonging to the same task are always ordered in ascending phase order: Phase 1, Phase 2, Phase 3, Phase 4, Phase 5
+    // 2. Otherwise sorted by date descending (newest dates first)
+    // 3. For updates on the same date: phases are sorted in ascending order (Phase 1, Phase 2, Phase 3...) and standalone chronologically ascending
+    combined.sort((a, b) => {
+      const taskIdA = getTaskId(a);
+      const taskIdB = getTaskId(b);
+      const titleA = getTaskTitle(a);
+      const titleB = getTaskTitle(b);
+
+      const isSameTask = Boolean(
+        (taskIdA && taskIdB && taskIdA === taskIdB) ||
+        (titleA && titleB && titleA === titleB)
+      );
+
+      if (isSameTask) {
+        const numA = (typeof a.phaseNumber === "number" && a.phaseNumber > 0) ? a.phaseNumber : 0;
+        const numB = (typeof b.phaseNumber === "number" && b.phaseNumber > 0) ? b.phaseNumber : 0;
+        if (numA !== numB) {
+          return numA - numB;
+        }
+        const timeA = new Date(a.updateDate || a.createdAt || 0).getTime();
+        const timeB = new Date(b.updateDate || b.createdAt || 0).getTime();
+        if (timeA !== timeB) return timeA - timeB;
+        return String(a._id || "").localeCompare(String(b._id || ""));
+      }
+
+      const dateStrA = getLocalDateString(a.updateDate || a.createdAt);
+      const dateStrB = getLocalDateString(b.updateDate || b.createdAt);
 
       if (dateStrA !== dateStrB) {
         return dateStrB.localeCompare(dateStrA);
       }
-      return String(b._id || "").localeCompare(String(a._id || ""));
+
+      const numA = (typeof a.phaseNumber === "number" && a.phaseNumber > 0) ? a.phaseNumber : 0;
+      const numB = (typeof b.phaseNumber === "number" && b.phaseNumber > 0) ? b.phaseNumber : 0;
+      if (numA > 0 && numB > 0 && numA !== numB) {
+        return numA - numB;
+      }
+
+      return String(a._id || "").localeCompare(String(b._id || ""));
     });
 
     const totalCount = combined.length;

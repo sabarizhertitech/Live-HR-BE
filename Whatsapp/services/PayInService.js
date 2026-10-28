@@ -49,12 +49,12 @@ class PayInService {
             const dateMatch = extractDate(text);
             if (dateMatch) {
                 if (!phone) {
-                    return "⚠️ Unable to detect phone number. Please try again.";
+                    return "Unable to detect phone number. Please try again.";
                 }
 
                 const customer = await Customer.findOne({ mobileNumber: phone });
                 if (!customer) {
-                    return "⚠️ Customer profile not found. Please complete registration.";
+                    return "Customer profile not found. Please complete registration.";
                 }
 
                 const startOfDay = new Date(dateMatch);
@@ -159,12 +159,12 @@ class PayInService {
                 text === "5"
             ) {
                 if (!phone) {
-                    return "⚠️ Unable to detect phone number. Please try again.";
+                    return "Unable to detect phone number. Please try again.";
                 }
 
                 const customer = await Customer.findOne({ mobileNumber: phone });
                 if (!customer) {
-                    return "⚠️ Customer profile not found. Please complete registration.";
+                    return "Customer profile not found. Please complete registration.";
                 }
 
                 const now = new Date();
